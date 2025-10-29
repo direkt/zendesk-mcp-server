@@ -2,6 +2,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import json
 import urllib.request
 import urllib.parse
+import urllib.error
+
 import base64
 import os
 
