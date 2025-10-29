@@ -1,0 +1,492 @@
+# Zendesk MCP Server
+
+![ci](https://github.com/reminia/zendesk-mcp-server/actions/workflows/ci.yml/badge.svg)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
+A Model Context Protocol server for Zendesk.
+
+This server provides a comprehensive integration with Zendesk. It offers:
+
+- Tools for retrieving and managing Zendesk tickets and comments
+- Specialized prompts for ticket analysis and response drafting
+- Full access to the Zendesk Help Center articles as knowledge base
+
+![demo](https://res.cloudinary.com/leecy-me/image/upload/v1736410626/open/zendesk_yunczu.gif)
+
+## Setup
+
+- build: `uv venv && uv pip install -e .` or `uv build` in short.
+- setup zendesk credentials in `.env` file, refer to [.env.example](.env.example).
+- configure in Claude desktop:
+
+```json
+{
+  "mcpServers": {
+      "zendesk": {
+          "command": "uv",
+          "args": [
+              "--directory",
+              "/path/to/zendesk-mcp-server",
+              "run",
+              "zendesk"
+          ]
+      }
+  }
+}
+```
+
+## Resources
+
+- zendesk://knowledge-base, get access to the whole help center articles.
+
+## Prompts
+
+### analyze-ticket
+
+Analyze a Zendesk ticket and provide a detailed analysis of the ticket.
+
+### draft-ticket-response
+
+Draft a response to a Zendesk ticket.
+
+## Tools
+
+### get_tickets
+
+Fetch the latest tickets with pagination support
+
+- Input:
+  - `page` (integer, optional): Page number (defaults to 1)
+  - `per_page` (integer, optional): Number of tickets per page, max 100 (defaults to 25)
+  - `sort_by` (string, optional): Field to sort by - created_at, updated_at, priority, or status (defaults to created_at)
+  - `sort_order` (string, optional): Sort order - asc or desc (defaults to desc)
+
+- Output: Returns a list of tickets with essential fields including id, subject, status, priority, description, timestamps, and assignee information, along with pagination metadata
+
+### get_ticket
+
+Retrieve a Zendesk ticket by its ID
+
+- Input:
+  - `ticket_id` (integer): The ID of the ticket to retrieve
+
+### get_ticket_comments
+
+Retrieve all comments for a Zendesk ticket by its ID
+
+- Input:
+  - `ticket_id` (integer): The ID of the ticket to get comments for
+
+### create_ticket_comment
+
+Create a new comment on an existing Zendesk ticket
+
+- Input:
+  - `ticket_id` (integer): The ID of the ticket to comment on
+  - `comment` (string): The comment text/content to add
+  - `public` (boolean, optional): Whether the comment should be public (defaults to true)
+
+### create_ticket
+
+Create a new Zendesk ticket
+
+- Input:
+  - `subject` (string): Ticket subject
+  - `description` (string): Ticket description
+  - `requester_id` (integer, optional)
+  - `assignee_id` (integer, optional)
+  - `priority` (string, optional): one of `low`, `normal`, `high`, `urgent`
+  - `type` (string, optional): one of `problem`, `incident`, `question`, `task`
+  - `tags` (array[string], optional)
+  - `custom_fields` (array[object], optional)
+
+### update_ticket
+
+Update fields on an existing Zendesk ticket (e.g., status, priority, assignee)
+
+- Input:
+  - `ticket_id` (integer): The ID of the ticket to update
+  - `subject` (string, optional)
+  - `status` (string, optional): one of `new`, `open`, `pending`, `on-hold`, `solved`, `closed`
+  - `priority` (string, optional): one of `low`, `normal`, `high`, `urgent`
+  - `type` (string, optional)
+  - `assignee_id` (integer, optional)
+  - `requester_id` (integer, optional)
+  - `tags` (array[string], optional)
+  - `custom_fields` (array[object], optional)
+  - `due_at` (string, optional): ISO8601 datetime
+
+### search_tickets
+
+Search for tickets using Zendesk's powerful query syntax (returns up to 1000 results)
+
+- Input:
+  - `query` (string, required): Search query using Zendesk syntax
+  - `sort_by` (string, optional): Field to sort by - `updated_at`, `created_at`, `priority`, `status`, or `ticket_type`
+  - `sort_order` (string, optional): Sort order - `asc` or `desc`
+  - `limit` (integer, optional): Maximum results to return (default 100, max 1000)
+
+- Query Syntax Examples:
+  - `status:open` - Find open tickets
+  - `priority:high status:open` - High priority open tickets
+  - `created>2024-01-01` - Tickets created after a date
+  - `tags:bug tags:urgent` - Tickets with bug OR urgent tag
+  - `assignee:email@example.com` - Tickets assigned to a user
+  - `assignee:none` - Unassigned tickets
+  - `subject:login*` - Subject containing words starting with "login"
+  - `status:pending -tags:spam` - Pending tickets without spam tag
+  - `organization:"Company Name"` - Tickets from an organization
+
+- Operators:
+  - `:` (equals), `>` (greater than), `<` (less than), `>=`, `<=`
+  - `-` (exclude), `*` (wildcard), `" "` (phrase search)
+
+- Output: Returns matching tickets with metadata including count, query info, and pagination status
+
+### search_tickets_export
+
+Search for tickets using the export API for unlimited results (no 1000 limit)
+
+- Input:
+  - `query` (string, required): Same query syntax as `search_tickets`
+  - `sort_by` (string, optional): Field to sort by
+  - `sort_order` (string, optional): Sort order - `asc` or `desc`
+  - `max_results` (integer, optional): Optional limit on results (default: unlimited)
+
+- Note: This endpoint can return very large result sets and may take significant time. Use for bulk exports or when you know there are >1000 matching tickets.
+
+- Output: Returns all matching tickets with metadata including total count and query info
+
+### upload_attachment
+
+Upload a file to Zendesk to get an attachment token that can be used when creating or updating tickets
+
+- Input:
+  - `file_path` (string, required): Path to the file to upload (absolute or relative)
+
+- Output: Returns upload details including:
+  - `token`: The upload token to use in the `uploads` array when creating/updating ticket comments
+  - `filename`: The uploaded filename
+  - `size`: File size in bytes
+  - `content_type`: MIME type of the file
+  - `expires_at`: Token expiration information (60 minutes)
+
+- Notes:
+  - File size limit is 50 MB
+  - Tokens expire after 60 minutes
+  - Use the token in `create_ticket_comment` by passing it in the comment body
+
+### get_ticket_attachments
+
+List all attachments from all comments on a ticket
+
+- Input:
+  - `ticket_id` (integer, required): The ID of the ticket to get attachments from
+
+- Output: Returns attachment details including:
+  - `attachments`: List of all attachments with details:
+    - `id`: Attachment ID
+    - `filename`: File name
+    - `content_url`: Direct download URL
+    - `content_type`: MIME type
+    - `size`: File size in bytes
+    - `comment_id`: ID of the comment containing the attachment
+    - `created_at`: When the attachment was added
+    - `author_id`: User who added the attachment
+  - `total_count`: Total number of attachments
+  - `total_size`: Total size of all attachments in bytes
+  - `total_size_mb`: Total size in megabytes
+
+### download_attachment
+
+Download an attachment by its ID
+
+- Input:
+  - `attachment_id` (integer, required): The ID of the attachment to download
+  - `save_path` (string, optional): Path to save the file. If not provided, returns download URL only.
+
+- Output: Returns download details including:
+  - `attachment_id`: The attachment ID
+  - `filename`: The attachment filename
+  - `content_url`: Direct download URL (can be used to download the file)
+  - `content_type`: MIME type
+  - `size`: File size in bytes
+  - `saved_to`: Path where file was saved (only if `save_path` was provided)
+  - `downloaded`: Boolean indicating if file was downloaded (only if `save_path` was provided)
+
+- Notes:
+  - If `save_path` is not provided, only returns the `content_url` for manual download
+  - If `save_path` is provided, automatically downloads and saves the file
+
+### find_related_tickets
+
+Find tickets related to the given ticket by subject similarity, same requester, or same organization
+
+- Input:
+  - `ticket_id` (integer, required): The ID of the reference ticket to find related tickets for
+  - `limit` (integer, optional): Maximum number of related tickets to return (default 100)
+
+- Output: Returns related tickets with:
+  - `related_tickets`: List of related tickets with relevance scores and reasons
+  - `count`: Number of related tickets found
+  - `reference_ticket`: Basic info about the reference ticket
+  - `search_strategy`: Description of how tickets were found
+
+- Notes:
+  - Uses Zendesk's search export API for unlimited historical results
+  - Searches by similar subjects, same requester, and same organization
+  - Results are deduplicated and ranked by relevance
+  - Each ticket includes `relevance_score` and `relevance_reason` fields
+
+### find_duplicate_tickets
+
+Identify potential duplicate tickets with highly similar subjects and same requester/organization
+
+- Input:
+  - `ticket_id` (integer, required): The ID of the reference ticket to find duplicates for
+  - `limit` (integer, optional): Maximum number of duplicate candidates to return (default 100)
+
+- Output: Returns duplicate candidates with:
+  - `duplicate_candidates`: List of potential duplicate tickets
+  - `count`: Number of duplicate candidates found
+  - `reference_ticket`: Basic info about the reference ticket
+  - `similarity_threshold`: Minimum similarity score for duplicates (0.7)
+
+- Notes:
+  - Uses similarity scoring with 0.7 threshold for duplicate detection
+  - Filters by same requester or organization for better precision
+  - Each candidate includes `similarity_score` and `duplicate_reason` fields
+  - Sorted by similarity score and creation date (older duplicates first)
+
+### find_ticket_thread
+
+Find all tickets in a conversation thread using via_id relationships
+
+- Input:
+  - `ticket_id` (integer, required): The ID of the reference ticket to find the thread for
+
+- Output: Returns thread information with:
+  - `thread_tickets`: List of all tickets in the thread (chronological order)
+  - `count`: Number of tickets in the thread
+  - `thread_root`: The root ticket of the thread (if exists)
+  - `thread_structure`: Description of the thread structure
+  - `reference_ticket_id`: The original ticket ID
+
+- Notes:
+  - Discovers parent tickets and child tickets to show complete conversation chain
+  - Uses Zendesk's via_id field to track ticket relationships
+  - Returns tickets in chronological order with relationship information
+  - Each ticket includes a `relationship` field (parent, child, reference)
+
+### get_ticket_relationships
+
+Get parent/child ticket relationships via the via field
+
+- Input:
+  - `ticket_id` (integer, required): The ID of the reference ticket to get relationships for
+
+- Output: Returns structured relationship data with:
+  - `relationships`: Complete relationship structure
+  - `parent_ticket`: Parent ticket info (if exists)
+  - `child_tickets`: List of child tickets
+  - `sibling_tickets`: List of sibling tickets (same parent)
+  - `relationship_type`: Description of the relationship
+  - `total_related`: Total number of related tickets
+
+- Notes:
+  - Shows structured relationship data including parent, child, and sibling tickets
+  - Helps understand ticket hierarchy and conversation flow
+  - Each ticket includes relationship type (parent, child, sibling)
+  - Relationship types: "Standalone ticket", "Child ticket", "Parent ticket", "Middle ticket in chain", "Sibling ticket"
+
+## Enhanced Search Tools
+
+### get_ticket_fields
+
+Retrieve all ticket fields including custom fields with their definitions
+
+- Input: None (no parameters required)
+
+- Output: Returns field definitions with:
+  - `fields`: List of all ticket fields with details
+  - `custom_fields`: List of custom fields only
+  - `system_fields`: List of system fields only
+  - `count`: Total number of fields
+  - `custom_count`: Number of custom fields
+  - `system_count`: Number of system fields
+
+- Notes:
+  - Each field includes ID, title, type, description, required status, and options
+  - Custom fields include dropdown options and validation rules
+  - Use field IDs to search by custom fields with `custom_field_12345:"value"` syntax
+
+### search_by_source
+
+Search for tickets created via a specific integration source/channel
+
+- Input:
+  - `channel` (string, required): Creation channel (email, web, mobile, api, chat, etc.)
+  - `sort_by` (string, optional): Field to sort by
+  - `sort_order` (string, optional): Sort order (asc or desc)
+  - `limit` (integer, optional): Maximum results (default 100, max 1000)
+
+- Output: Returns tickets created via the specified channel
+
+- Notes:
+  - Uses Zendesk's `via.channel` field for filtering
+  - Common channels: email, web, mobile, api, chat, voice, twitter, facebook
+  - Helps analyze ticket volume by creation method
+
+### search_tickets_enhanced
+
+Enhanced ticket search with client-side filtering capabilities
+
+- Input:
+  - `query` (string, required): Base Zendesk search query
+  - `regex_pattern` (string, optional): Regex pattern to filter results
+  - `fuzzy_term` (string, optional): Term for fuzzy matching (handles typos)
+  - `fuzzy_threshold` (number, optional): Similarity threshold 0.0-1.0 (default 0.7)
+  - `proximity_terms` (array, optional): Terms for proximity search (2+ terms)
+  - `proximity_distance` (integer, optional): Max words between terms (default 5)
+  - `sort_by` (string, optional): Field to sort by
+  - `sort_order` (string, optional): Sort order
+  - `limit` (integer, optional): Maximum results (default 100)
+
+- Output: Returns filtered tickets with enhancement metadata
+
+- Notes:
+  - **WARNING**: Client-side processing may impact performance with large result sets
+  - Regex examples: `\b[A-Z]{2,}\b` for uppercase words, `\d{4}-\d{2}-\d{2}` for dates
+  - Fuzzy matching helps find tickets with typos or variations
+  - Proximity search finds tickets where terms appear within N words of each other
+  - Results include match information (field, score, distance)
+
+### build_search_query
+
+Build a Zendesk search query from structured parameters
+
+- Input:
+  - `status` (string, optional): Ticket status (new, open, pending, on-hold, solved, closed)
+  - `priority` (string, optional): Priority (low, normal, high, urgent)
+  - `assignee` (string, optional): Assignee email or "none" for unassigned
+  - `requester` (string, optional): Requester email
+  - `organization` (string, optional): Organization name
+  - `tags` (array, optional): List of tags to include
+  - `tags_logic` (string, optional): Logic for tags (AND or OR, default OR)
+  - `exclude_tags` (array, optional): List of tags to exclude
+  - `created_after` (string, optional): Created after date (ISO8601)
+  - `created_before` (string, optional): Created before date (ISO8601)
+  - `updated_after` (string, optional): Updated after date (ISO8601)
+  - `updated_before` (string, optional): Updated before date (ISO8601)
+  - `solved_after` (string, optional): Solved after date (ISO8601)
+  - `solved_before` (string, optional): Solved before date (ISO8601)
+  - `due_after` (string, optional): Due after date (ISO8601)
+  - `due_before` (string, optional): Due before date (ISO8601)
+  - `custom_fields` (object, optional): Custom field IDs to values
+  - `subject_contains` (string, optional): Text to search in subject
+  - `description_contains` (string, optional): Text to search in description
+  - `comment_contains` (string, optional): Text to search in comments
+
+- Output: Returns generated query string and usage examples
+
+- Notes:
+  - Helps construct complex queries without knowing Zendesk syntax
+  - Returns properly formatted query string ready for use
+  - Includes examples and parameter validation
+
+## Search Analytics Tools
+
+### get_search_statistics
+
+Analyze search results and return aggregated statistics
+
+- Input:
+  - `query` (string, required): Zendesk search query to analyze
+  - `sort_by` (string, optional): Field to sort by
+  - `sort_order` (string, optional): Sort order (asc or desc)
+  - `limit` (integer, optional): Maximum tickets to analyze (default 1000)
+
+- Output: Returns comprehensive statistics including:
+  - `by_status`: Count by ticket status
+  - `by_priority`: Count by priority level
+  - `by_assignee`: Top assignees
+  - `by_requester`: Top requesters
+  - `by_organization`: Top organizations
+  - `by_tags`: Most common tags
+  - `by_month`: Distribution by creation month
+  - `resolution_time`: Average, min, max resolution times
+  - `summary`: Key insights and top performers
+
+- Notes:
+  - Provides insights for reporting and analysis
+  - Calculates resolution times for solved tickets
+  - Identifies top performers and common patterns
+  - Useful for dashboards and management reporting
+
+## Advanced Filtering Tools
+
+### search_by_date_range
+
+Search tickets by date range with support for relative dates
+
+- Input:
+  - `date_field` (string, optional): Date field (created, updated, solved, due, default created)
+  - `range_type` (string, optional): Type (custom or relative, default custom)
+  - `start_date` (string, optional): Start date (ISO8601 format)
+  - `end_date` (string, optional): End date (ISO8601 format)
+  - `relative_period` (string, optional): Relative period (last_7_days, last_30_days, this_month, last_month, this_quarter, last_quarter)
+  - `sort_by` (string, optional): Field to sort by
+  - `sort_order` (string, optional): Sort order
+  - `limit` (integer, optional): Maximum results (default 100)
+
+- Output: Returns tickets in the specified date range
+
+- Notes:
+  - Supports both custom date ranges and predefined periods
+  - Relative periods automatically calculate start/end dates
+  - Useful for time-based analysis and reporting
+
+### search_by_tags_advanced
+
+Advanced tag-based search with AND/OR/NOT logic
+
+- Input:
+  - `include_tags` (array, optional): Tags to include in search
+  - `exclude_tags` (array, optional): Tags to exclude from search
+  - `tag_logic` (string, optional): Logic for include_tags (AND or OR, default OR)
+  - `sort_by` (string, optional): Field to sort by
+  - `sort_order` (string, optional): Sort order
+  - `limit` (integer, optional): Maximum results (default 100)
+
+- Output: Returns tickets matching tag criteria
+
+- Notes:
+  - AND logic: tickets must have ALL include_tags
+  - OR logic: tickets must have ANY include_tags
+  - Exclude tags always use NOT logic
+  - Useful for complex tag-based filtering
+
+### batch_search_tickets
+
+Execute multiple searches concurrently and return grouped results
+
+- Input:
+  - `queries` (array, required): List of search queries to execute
+  - `deduplicate` (boolean, optional): Remove duplicates across queries (default true)
+  - `sort_by` (string, optional): Field to sort by
+  - `sort_order` (string, optional): Sort order
+  - `limit_per_query` (integer, optional): Maximum results per query (default 100)
+
+- Output: Returns grouped results with execution metrics:
+  - `queries_executed`: Number of queries executed
+  - `total_tickets`: Total tickets found
+  - `unique_tickets`: Unique tickets (if deduplication applied)
+  - `total_execution_time_ms`: Total execution time
+  - `query_results`: Results grouped by query
+  - `all_tickets`: Combined unique tickets (if deduplication applied)
+
+- Notes:
+  - Executes searches concurrently for better performance
+  - Useful for dashboards and multi-criteria reporting
+  - Can deduplicate results across queries
+  - Provides execution metrics for performance monitoring
