@@ -1,9 +1,11 @@
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Optional, Tuple, Union
 import json
 import urllib.request
 import urllib.parse
 import base64
 import os
+
+from datetime import datetime
 
 from zenpy import Zenpy
 from zenpy.lib.api_objects import Comment
@@ -26,15 +28,38 @@ def _urlopen_with_retry(req, max_attempts: int = 5):
         try:
             return urllib.request.urlopen(req)
         except urllib.error.HTTPError as e:
-            # Retry on 429 Too Many Requests
-            if getattr(e, 'code', None) == 429 and attempt < max_attempts - 1:
+            code = getattr(e, "code", None)
+            # Retry on 429 Too Many Requests or transient 5xx errors
+            if code == 429 or (isinstance(code, int) and 500 <= code < 600):
+                if attempt < max_attempts - 1:
+                    # Honor Retry-After header if present
+                    delay = None
+                    headers = getattr(e, "headers", None) or getattr(e, "hdrs", None)
+                    if headers:
+                        try:
+                            retry_after = headers.get("Retry-After") or headers.get("retry-after")
+                            if retry_after:
+                                retry_after = retry_after.strip()
+                                if retry_after.isdigit():
+                                    delay = int(retry_after)
+                        except Exception:
+                            delay = None
+                    if delay is None:
+                        delay = min(2 ** attempt + random.random(), 30)
+                    time.sleep(delay)
+                    last_err = e
+                    continue
+            # Re-raise other HTTP errors immediately
+            raise
+        except urllib.error.URLError as e:
+            # Treat network errors as retryable
+            if attempt < max_attempts - 1:
                 delay = min(2 ** attempt + random.random(), 30)
                 time.sleep(delay)
                 last_err = e
                 continue
-            # Re-raise other HTTP errors immediately
             raise
-    # If we exhausted retries, re-raise the last 429 error
+    # If we exhausted retries, re-raise the last error
     if last_err:
         raise last_err
 
@@ -58,6 +83,23 @@ class ZendeskClient:
         credentials = f"{email}/token:{token}"
         encoded_credentials = base64.b64encode(credentials.encode()).decode('ascii')
         self.auth_header = f"Basic {encoded_credentials}"
+        # Optional cursor store for incremental APIs
+        self.cursor_store = None
+        self.cursor_label = None
+
+
+    def set_cursor_store(self, store: Any, label: str | None = None) -> None:
+        """Inject an optional cursor store used by incremental API wrappers.
+
+        The store must implement get_cursor(key) -> int | None and set_cursor(key, value: int) -> None.
+        An optional label can be provided to namespace cursors per timebox/use-case.
+        """
+        self.cursor_store = store
+        self.cursor_label = label
+
+    def _cursor_key(self, endpoint: str) -> str:
+        label_part = f":{self.cursor_label}" if getattr(self, "cursor_label", None) else ""
+        return f"{self.subdomain}:{endpoint}{label_part}"
 
     def get_ticket(self, ticket_id: int) -> Dict[str, Any]:
         """
@@ -97,20 +139,218 @@ class ZendeskClient:
         except Exception as e:
             raise Exception(f"Failed to get comments for ticket {ticket_id}: {str(e)}")
 
-    def post_comment(self, ticket_id: int, comment: str, public: bool = True) -> str:
+    # Internal helper to GET a path and return parsed JSON
+    def _get_json(self, path: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        query = urllib.parse.urlencode(params or {})
+        url = f"{self.base_url}{path}{('?' + query) if query else ''}"
+        req = urllib.request.Request(url)
+        req.add_header('Authorization', self.auth_header)
+        req.add_header('Content-Type', 'application/json')
+        with _urlopen_with_retry(req) as response:
+            return json.loads(response.read().decode('utf-8'))
+
+    # Internal helper to GET a fully-qualified URL (e.g., next_page) and return parsed JSON
+    def _get_json_url(self, url: str) -> Dict[str, Any]:
+        req = urllib.request.Request(url)
+        req.add_header('Authorization', self.auth_header)
+        req.add_header('Content-Type', 'application/json')
+        with _urlopen_with_retry(req) as response:
+            return json.loads(response.read().decode('utf-8'))
+    # Incremental API generic fetcher
+    def _incremental_fetch(
+        self,
+        path: str,
+        items_key: str,
+        start_time: int | datetime,
+        include_csv: str | None = None,
+        max_results: int | None = None,
+        cursor_endpoint_key: str | None = None,
+    ) -> tuple[list[dict], bool, int | None]:
+        """Fetch items from an incremental endpoint with robust paging and backoff.
+
+        Returns (items, has_more, next_start_time).
         """
-        Post a comment to an existing ticket.
+        # Coerce start_time
+        if isinstance(start_time, datetime):
+            start_ts = int(start_time.timestamp())
+        elif isinstance(start_time, int):
+            start_ts = int(start_time)
+        else:
+            raise ValueError("start_time must be int or datetime")
+        if start_ts < 0:
+            raise ValueError("start_time must be >= 0")
+
+        # Seed from cursor store if present and more recent
+        effective_ts = start_ts
+        if getattr(self, "cursor_store", None) and cursor_endpoint_key:
+            try:
+                key = self._cursor_key(cursor_endpoint_key)
+                last = self.cursor_store.get_cursor(key)
+                if isinstance(last, int) and last > effective_ts:
+                    effective_ts = last
+            except Exception:
+                # best-effort; ignore cursor errors
+                pass
+
+        params: Dict[str, Any] = {"start_time": effective_ts}
+        if include_csv:
+            params["include"] = include_csv
+
+        items: list[dict] = []
+        has_more: bool = False
+        next_start_time: Optional[int] = None
+        next_url: Optional[str] = None
+        seen_pages: set[str] = set()
+
+        def fetch(url: Optional[str]) -> Dict[str, Any]:
+            if url:
+                return self._get_json_url(url)
+            return self._get_json(path, params)
+
+        while True:
+            data = fetch(next_url)
+            page_items = list(data.get(items_key) or [])
+
+            # Aggregate with respect to max_results
+            if max_results is not None and max_results >= 0:
+                remaining = max_results - len(items)
+                if remaining <= 0:
+                    # We already reached the cap; determine has_more below and break
+                    pass
+                else:
+                    items.extend(page_items[:remaining])
+            else:
+                items.extend(page_items)
+
+            raw_next = data.get("next_page") or data.get("after_url")
+            eos = data.get("end_of_stream")
+            end_time_val = data.get("end_time")
+
+            # Determine candidate next_start_time
+            candidate: Optional[int] = None
+            if isinstance(end_time_val, int):
+                candidate = end_time_val
+            elif raw_next:
+                try:
+                    parsed = urllib.parse.urlparse(raw_next)
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    st_vals = qs.get("start_time") or qs.get("start_time[]") or qs.get("start_time[]")
+                    if st_vals and len(st_vals) > 0 and st_vals[0].isdigit():
+                        candidate = int(st_vals[0])
+                except Exception:
+                    candidate = None
+
+            if candidate is not None:
+                next_start_time = candidate
+
+            # Decide has_more as per contract (considering server signal)
+            has_more = bool(raw_next) and (eos is False or eos is None)
+
+            # Stop conditions
+            if max_results is not None and len(items) >= max_results:
+                # We reached the cap; signal has_more if server showed more
+                break
+            if not raw_next or eos is True:
+                break
+            if raw_next in seen_pages:
+                # loop safety
+                break
+
+            seen_pages.add(raw_next)
+            next_url = raw_next
+
+        # Clock skew/loop safety adjustment for next_start_time
+        if next_start_time is not None and next_start_time <= effective_ts:
+            next_start_time = effective_ts + 1
+
+        # If no more, do not suggest a next_start_time
+        final_next = next_start_time if has_more else None
+
+        # Persist cursor if store provided
+        if getattr(self, "cursor_store", None) and cursor_endpoint_key and isinstance(final_next, int):
+            try:
+                key = self._cursor_key(cursor_endpoint_key)
+                self.cursor_store.set_cursor(key, final_next)
+            except Exception:
+                pass
+
+        return items, has_more, final_next
+
+    def incremental_tickets(
+        self,
+        start_time: int | datetime,
+        include: list[str] | None = None,
+        max_results: int | None = None,
+    ) -> tuple[list[dict], bool, int | None]:
+        """Incremental Tickets API wrapper.
+
+        Args:
+            start_time: Unix epoch seconds or datetime to start from (inclusive).
+            include: Optional list of include values; passed as CSV to include= query.
+            max_results: Global cap across pages; fetches until end if None.
+
+        Returns: (items, has_more, next_start_time)
+        """
+        include_csv = ",".join(include) if include else None
+        return self._incremental_fetch(
+            path="/incremental/tickets.json",
+            items_key="tickets",
+            start_time=start_time,
+            include_csv=include_csv,
+            max_results=max_results,
+            cursor_endpoint_key="incremental_tickets",
+        )
+
+    def incremental_ticket_events(
+        self,
+        start_time: int | datetime,
+        max_results: int | None = None,
+    ) -> tuple[list[dict], bool, int | None]:
+        """Incremental Ticket Events API wrapper.
+
+        Returns: (items, has_more, next_start_time)
+        """
+        return self._incremental_fetch(
+            path="/incremental/ticket_events.json",
+            items_key="ticket_events",
+            start_time=start_time,
+            include_csv=None,
+            max_results=max_results,
+            cursor_endpoint_key="incremental_ticket_events",
+        )
+
+
+    def get_ticket_audits(self, ticket_id: int, limit: int = 100) -> Dict[str, Any]:
+        """
+        Fetch ticket audits with pagination up to the given limit.
+        Returns a dict with audits, count, and has_more.
         """
         try:
-            ticket = self.client.tickets(id=ticket_id)
-            ticket.comment = Comment(
-                html_body=comment,
-                public=public
-            )
-            self.client.tickets.update(ticket)
-            return comment
+            audits: List[Dict[str, Any]] = []
+            has_more = False
+            url = f"{self.base_url}/tickets/{ticket_id}/audits.json"
+
+            while url and len(audits) < limit:
+                data = self._get_json_url(url)
+                page_audits = data.get('audits') or []
+                audits.extend(page_audits)
+                url = data.get('next_page')
+                if len(audits) >= limit:
+                    has_more = bool(url)
+                    break
+
+            if len(audits) > limit:
+                audits = audits[:limit]
+
+            return {
+                'audits': audits,
+                'count': len(audits),
+                'has_more': has_more,
+            }
         except Exception as e:
-            raise Exception(f"Failed to post comment on ticket {ticket_id}: {str(e)}")
+            raise Exception(f"Failed to get audits for ticket {ticket_id}: {str(e)}")
+
+
 
     def get_tickets(self, page: int = 1, per_page: int = 25, sort_by: str = 'created_at', sort_order: str = 'desc') -> Dict[str, Any]:
         """
@@ -181,6 +421,22 @@ class ZendeskClient:
             raise Exception(f"Failed to get latest tickets: HTTP {e.code} - {e.reason}. {error_body}")
         except Exception as e:
             raise Exception(f"Failed to get latest tickets: {str(e)}")
+
+
+    def post_comment(self, ticket_id: int, comment: str, public: bool = True) -> str:
+        """
+        Post a comment to an existing ticket.
+        """
+        try:
+            ticket = self.client.tickets(id=ticket_id)
+            ticket.comment = Comment(
+                html_body=comment,
+                public=public
+            )
+            self.client.tickets.update(ticket)
+            return comment
+        except Exception as e:
+            raise Exception(f"Failed to post comment on ticket {ticket_id}: {str(e)}")
 
     def get_all_articles(self) -> Dict[str, Any]:
         """
