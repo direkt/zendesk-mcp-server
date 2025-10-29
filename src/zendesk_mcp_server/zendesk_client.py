@@ -350,6 +350,172 @@ class ZendeskClient:
         except Exception as e:
             raise Exception(f"Failed to get audits for ticket {ticket_id}: {str(e)}")
 
+    def _get_ticket_comments_with_attachments(self, ticket_id: int, limit: int = 50) -> Dict[str, Any]:
+        """
+        Fetch ticket comments (via direct API) including attachments, up to limit.
+        Returns a dict with comments (normalized), count, has_more.
+        """
+        try:
+            comments: List[Dict[str, Any]] = []
+            has_more = False
+            url = f"{self.base_url}/tickets/{ticket_id}/comments.json"
+
+            while url and len(comments) < limit:
+                data = self._get_json_url(url)
+                for c in data.get('comments', []) or []:
+                    att_list = []
+                    for a in c.get('attachments', []) or []:
+                        att_list.append({
+                            'id': a.get('id'),
+                            'file_name': a.get('file_name'),
+                            'content_type': a.get('content_type'),
+                            'content_url': a.get('content_url'),
+                            'size': a.get('size'),
+                        })
+                    comments.append({
+                        'id': c.get('id'),
+                        'author_id': c.get('author_id'),
+                        'body': c.get('body'),
+                        'html_body': c.get('html_body'),
+                        'public': c.get('public'),
+                        'created_at': c.get('created_at'),
+                        'attachments': att_list,
+                    })
+                    if len(comments) >= limit:
+                        break
+                url = data.get('next_page') if len(comments) < limit else None
+                if len(comments) >= limit:
+                    has_more = bool(url)
+                    break
+
+            if len(comments) > limit:
+                comments = comments[:limit]
+
+            return {
+                'comments': comments,
+                'count': len(comments),
+                'has_more': has_more,
+            }
+        except Exception as e:
+            raise Exception(f"Failed to get comments for ticket {ticket_id}: {str(e)}")
+
+    def _get_user(self, user_id: int) -> Dict[str, Any] | None:
+        try:
+            data = self._get_json(f"/users/{user_id}.json")
+            return data.get('user') or data
+        except Exception:
+            return None
+
+    def _get_organization(self, org_id: int) -> Dict[str, Any] | None:
+        try:
+            data = self._get_json(f"/organizations/{org_id}.json")
+            return data.get('organization') or data
+        except Exception:
+            return None
+
+    def get_ticket_bundle(self, ticket_id: int, comment_limit: int = 50, audit_limit: int = 100) -> Dict[str, Any]:
+        """
+        Consolidate ticket, audits, comments(with attachments), and requester/assignee/org context
+        into a single response with a chronological timeline.
+        """
+        # Core ticket (raise if not found)
+        ticket = self.get_ticket(ticket_id)
+
+        # Comments and audits with limits
+        comments_res = self._get_ticket_comments_with_attachments(ticket_id, limit=comment_limit)
+        audits_res = self.get_ticket_audits(ticket_id, limit=audit_limit)
+
+        comments = comments_res['comments']
+        audits = audits_res['audits']
+
+        # User/org context (best effort)
+        requester = self._get_user(ticket.get('requester_id')) if ticket.get('requester_id') else None
+        assignee = self._get_user(ticket.get('assignee_id')) if ticket.get('assignee_id') else None
+        organization = self._get_organization(ticket.get('organization_id')) if ticket.get('organization_id') else None
+
+        # Build timeline from audits (field changes) and comments
+        timeline: List[Dict[str, Any]] = []
+
+        # Normalize audit events
+        for audit in audits:
+            created_at = audit.get('created_at') or audit.get('timestamp')
+            author_id = audit.get('author_id')
+            for ev in audit.get('events', []) or []:
+                ev_type = (ev.get('type') or '').lower()
+                if 'comment' in ev_type:
+                    # Skip audit comment events; comments are already included
+                    continue
+                if 'change' in ev_type or ev_type == 'change':
+                    field = ev.get('field') or ev.get('field_name') or ev.get('attribute')
+                    prev_val = ev.get('previous_value') or ev.get('previous') or ev.get('from')
+                    new_val = ev.get('value') or ev.get('new_value') or ev.get('to')
+                    if field == 'status':
+                        event_type = 'status_change'
+                    elif field == 'assignee_id':
+                        event_type = 'assignment'
+                    elif field == 'priority':
+                        event_type = 'priority_change'
+                    else:
+                        event_type = 'field_update'
+                    timeline.append({
+                        'timestamp': created_at,
+                        'event_type': event_type,
+                        'author_id': author_id,
+                        'details': {
+                            'field': field,
+                            'from': prev_val,
+                            'to': new_val,
+                        }
+                    })
+                else:
+                    # Generic audit event
+                    timeline.append({
+                        'timestamp': created_at,
+                        'event_type': ev.get('type') or 'audit_event',
+                        'author_id': author_id,
+                        'details': {k: v for k, v in ev.items() if k not in ('type')}
+                    })
+
+        # Normalize comment events
+        for c in comments:
+            timeline.append({
+                'timestamp': c.get('created_at'),
+                'event_type': 'comment',
+                'author_id': c.get('author_id'),
+                'details': {
+                    'public': c.get('public'),
+                    'attachments': c.get('attachments') or [],
+                }
+            })
+
+        # Sort timeline chronologically (oldest first)
+        timeline.sort(key=lambda e: e.get('timestamp') or '')
+
+        summary = {
+            'total_comments': len(comments),
+            'total_audits': len(audits),
+            'status_changes': sum(1 for e in timeline if e['event_type'] == 'status_change'),
+            'assignment_changes': sum(1 for e in timeline if e['event_type'] == 'assignment'),
+            'last_updated': ticket.get('updated_at'),
+        }
+
+        return {
+            'ticket_id': ticket_id,
+            'ticket': ticket,
+            'requester': requester,
+            'assignee': assignee,
+            'organization': organization,
+            'comments': comments,
+            'comments_count': len(comments),
+            'comments_has_more': comments_res['has_more'],
+            'audits': audits,
+            'audits_count': len(audits),
+            'audits_has_more': audits_res['has_more'],
+            'timeline': timeline,
+            'summary': summary,
+        }
+
+
 
 
     def get_tickets(self, page: int = 1, per_page: int = 25, sort_by: str = 'created_at', sort_order: str = 'desc') -> Dict[str, Any]:
