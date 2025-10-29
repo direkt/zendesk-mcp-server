@@ -383,10 +383,11 @@ class ZendeskClient:
                     })
                     if len(comments) >= limit:
                         break
-                url = data.get('next_page') if len(comments) < limit else None
+                next_page = data.get('next_page')
                 if len(comments) >= limit:
-                    has_more = bool(url)
+                    has_more = bool(next_page)
                     break
+                url = next_page
 
             if len(comments) > limit:
                 comments = comments[:limit]
