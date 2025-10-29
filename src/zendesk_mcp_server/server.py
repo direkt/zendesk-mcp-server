@@ -983,6 +983,34 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["queries"]
             }
         )
+,
+        types.Tool(
+            name="get_ticket_bundle_zendesk",
+            description=(
+                "Fetch comprehensive ticket bundle including ticket details, comments, audits, user/org context, "
+                "and chronological timeline. Ideal for rapid case triage."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticket_id": {
+                        "type": "integer",
+                        "description": "The ID of the ticket to bundle"
+                    },
+                    "comment_limit": {
+                        "type": "integer",
+                        "description": "Max comments to include (default 50)",
+                        "default": 50
+                    },
+                    "audit_limit": {
+                        "type": "integer",
+                        "description": "Max audits to include (default 100)",
+                        "default": 100
+                    }
+                },
+                "required": ["ticket_id"]
+            }
+        )
     ]
 
 
@@ -1430,6 +1458,26 @@ async def handle_call_tool(
                 sort_by=arguments.get("sort_by") if arguments else None,
                 sort_order=arguments.get("sort_order") if arguments else None,
                 limit=arguments.get("limit", 100) if arguments else 100
+            )
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "get_ticket_bundle_zendesk":
+            if not arguments:
+                raise ValueError("Missing arguments")
+            ticket_id = arguments.get("ticket_id")
+            if ticket_id is None:
+                raise ValueError("ticket_id is required")
+            comment_limit = arguments.get("comment_limit", 50)
+            audit_limit = arguments.get("audit_limit", 100)
+
+            result = await run_client_call(
+                client.get_ticket_bundle,
+                int(ticket_id),
+                comment_limit,
+                audit_limit,
             )
             return [types.TextContent(
                 type="text",
