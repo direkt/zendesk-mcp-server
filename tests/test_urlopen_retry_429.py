@@ -26,7 +26,7 @@ def test_get_tickets_retries_on_429(monkeypatch):
 
     call_state = {"n": 0}
 
-    def fake_urlopen(req):
+    def fake_urlopen(req, max_attempts=5):
         call_state["n"] += 1
         url = getattr(req, "full_url", str(req))
         if "tickets.json" in url and call_state["n"] < 3:
@@ -48,7 +48,8 @@ def test_get_tickets_retries_on_429(monkeypatch):
 
     # Avoid actual sleeping in retry loop
     monkeypatch.setattr(_time, "sleep", lambda s: None)
-    monkeypatch.setattr(zc.urllib.request, "urlopen", fake_urlopen, raising=False)
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen, raising=False)
 
     from zendesk_mcp_server.zendesk_client import ZendeskClient
 

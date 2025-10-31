@@ -11,7 +11,7 @@ from mcp.server import Server, types
 from mcp.server.stdio import stdio_server
 from pydantic import AnyUrl
 
-from zendesk_mcp_server.zendesk_client import ZendeskClient
+from zendesk_mcp_server.client import ZendeskClient
 
 LOGGER_NAME = "zendesk-mcp-server"
 logger = logging.getLogger(LOGGER_NAME)
@@ -1010,6 +1010,63 @@ async def handle_list_tools() -> list[types.Tool]:
                 },
                 "required": ["ticket_id"]
             }
+        ),
+        types.Tool(
+            name="get_case_volume_analytics",
+            description=(
+                "Comprehensive ticket analytics including volumes, response times, resolution times, "
+                "channel breakdowns, assignment metrics, status transitions, and satisfaction scores. "
+                "Supports flexible time bucketing (daily/weekly/monthly) and grouping/filtering options."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "Inclusive start date (YYYY-MM-DD). Defaults to cover last 13 weeks / 12 months."
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Inclusive end date (YYYY-MM-DD). Defaults to today."
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Optional max tickets to analyze."
+                    },
+                    "include_metrics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Metric types to include. Options: 'response_times', 'resolution_times', 'channels', 'forms', 'assignments', 'status_transitions', 'satisfaction'. Defaults to all."
+                    },
+                    "group_by": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Dimensions to group by. Options: 'channel', 'form', 'priority', 'type', 'group_id', 'tags'."
+                    },
+                    "filter_by_status": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter tickets to specific statuses (e.g., ['open', 'solved'])."
+                    },
+                    "filter_by_priority": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter tickets to specific priorities (e.g., ['high', 'urgent'])."
+                    },
+                    "filter_by_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter tickets to those containing any of the specified tags (e.g., ['bug', 'urgent'])."
+                    },
+                    "time_bucket": {
+                        "type": "string",
+                        "enum": ["daily", "weekly", "monthly"],
+                        "description": "Time bucketing granularity. Defaults to 'weekly'.",
+                        "default": "weekly"
+                    }
+                },
+                "required": []
+            }
         )
     ]
 
@@ -1021,492 +1078,16 @@ async def handle_call_tool(
 ) -> list[types.TextContent]:
     """Handle Zendesk tool execution requests"""
     try:
+        from zendesk_mcp_server.handlers import TOOL_HANDLERS
+        
         client = get_zendesk_client()
-        if name == "get_ticket":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            ticket = await run_client_call(
-                client.get_ticket,
-                arguments["ticket_id"]
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(ticket)
-            )]
-
-        elif name == "create_ticket":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            created = await run_client_call(
-                client.create_ticket,
-                subject=arguments.get("subject"),
-                description=arguments.get("description"),
-                requester_id=arguments.get("requester_id"),
-                assignee_id=arguments.get("assignee_id"),
-                priority=arguments.get("priority"),
-                type=arguments.get("type"),
-                tags=arguments.get("tags"),
-                custom_fields=arguments.get("custom_fields"),
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps({"message": "Ticket created successfully", "ticket": created}, indent=2)
-            )]
-
-        elif name == "get_tickets":
-            page = arguments.get("page", 1) if arguments else 1
-            per_page = arguments.get("per_page", 25) if arguments else 25
-            sort_by = arguments.get("sort_by", "created_at") if arguments else "created_at"
-            sort_order = arguments.get("sort_order", "desc") if arguments else "desc"
-
-            tickets = await run_client_call(
-                client.get_tickets,
-                page=page,
-                per_page=per_page,
-                sort_by=sort_by,
-                sort_order=sort_order
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(tickets, indent=2)
-            )]
-
-        elif name == "get_ticket_comments":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            comments = await run_client_call(
-                client.get_ticket_comments,
-                arguments["ticket_id"]
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(comments)
-            )]
-
-        elif name == "create_ticket_comment":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            public = arguments.get("public", True)
-            result = await run_client_call(
-                client.post_comment,
-                ticket_id=arguments["ticket_id"],
-                comment=arguments["comment"],
-                public=public
-            )
-            return [types.TextContent(
-                type="text",
-                text=f"Comment created successfully: {result}"
-            )]
-
-        elif name == "update_ticket":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            ticket_id = arguments.get("ticket_id")
-            if ticket_id is None:
-                raise ValueError("ticket_id is required")
-            update_fields = {k: v for k, v in arguments.items() if k != "ticket_id"}
-            updated = await run_client_call(
-                client.update_ticket,
-                int(ticket_id),
-                **update_fields
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps({"message": "Ticket updated successfully", "ticket": updated}, indent=2)
-            )]
-
-        elif name == "search_tickets":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            query = arguments.get("query")
-            if not query:
-                raise ValueError("query is required")
-
-            results = await run_client_call(
-                client.search_tickets,
-                query=query,
-                sort_by=arguments.get("sort_by"),
-                sort_order=arguments.get("sort_order"),
-                limit=arguments.get("limit", 100)
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(results, indent=2)
-            )]
-
-        elif name == "search_tickets_export":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            query = arguments.get("query")
-            if not query:
-                raise ValueError("query is required")
-
-            results = await run_client_call(
-                client.search_tickets_export,
-                query=query,
-                sort_by=arguments.get("sort_by"),
-                sort_order=arguments.get("sort_order"),
-                max_results=arguments.get("max_results")
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(results, indent=2)
-            )]
-
-        elif name == "upload_attachment":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            file_path = arguments.get("file_path")
-            if not file_path:
-                raise ValueError("file_path is required")
-
-            result = await run_client_call(
-                client.upload_attachment,
-                file_path
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "get_ticket_attachments":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            ticket_id = arguments.get("ticket_id")
-            if ticket_id is None:
-                raise ValueError("ticket_id is required")
-
-            result = await run_client_call(
-                client.get_ticket_attachments,
-                int(ticket_id)
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "download_attachment":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            attachment_id = arguments.get("attachment_id")
-            if attachment_id is None:
-                raise ValueError("attachment_id is required")
-
-            result = await run_client_call(
-                client.download_attachment,
-                int(attachment_id),
-                save_path=arguments.get("save_path")
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "search_kb_articles":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            query = arguments.get("query")
-            if not query:
-                raise ValueError("query is required")
-
-            result = await run_client_call(
-                client.search_articles,
-                query=query,
-                label_names=arguments.get("labels"),
-                section_id=arguments.get("section_id"),
-                per_page=arguments.get("limit", 10),
-                sort_by=arguments.get("sort_by", "relevance")
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "get_kb_article":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            article_id = arguments.get("article_id")
-            if article_id is None:
-                raise ValueError("article_id is required")
-
-            result = await run_client_call(
-                client.get_article_by_id,
-                int(article_id)
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "search_kb_by_labels":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            labels = arguments.get("labels")
-            if not labels:
-                raise ValueError("labels is required")
-
-            result = await run_client_call(
-                client.search_articles_by_labels,
-                label_names=labels,
-                per_page=arguments.get("limit", 10)
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "list_kb_sections":
-            result = await run_client_call(
-                client.get_sections_list
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "find_related_tickets":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            ticket_id = arguments.get("ticket_id")
-            if ticket_id is None:
-                raise ValueError("ticket_id is required")
-            limit = arguments.get("limit", 100)
-
-            result = await run_client_call(
-                client.find_related_tickets,
-                int(ticket_id),
-                limit
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "find_duplicate_tickets":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            ticket_id = arguments.get("ticket_id")
-            if ticket_id is None:
-                raise ValueError("ticket_id is required")
-            limit = arguments.get("limit", 100)
-
-            result = await run_client_call(
-                client.find_duplicate_tickets,
-                int(ticket_id),
-                limit
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "find_ticket_thread":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            ticket_id = arguments.get("ticket_id")
-            if ticket_id is None:
-                raise ValueError("ticket_id is required")
-
-            result = await run_client_call(
-                client.find_ticket_thread,
-                int(ticket_id)
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "get_ticket_relationships":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            ticket_id = arguments.get("ticket_id")
-            if ticket_id is None:
-                raise ValueError("ticket_id is required")
-
-            result = await run_client_call(
-                client.get_ticket_relationships,
-                int(ticket_id)
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "get_ticket_fields":
-            result = await run_client_call(
-                client.get_ticket_fields
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "search_by_source":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            channel = arguments.get("channel")
-            if not channel:
-                raise ValueError("channel is required")
-
-            result = await run_client_call(
-                client.search_by_integration_source,
-                channel=channel,
-                sort_by=arguments.get("sort_by"),
-                sort_order=arguments.get("sort_order"),
-                limit=arguments.get("limit", 100)
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "search_tickets_enhanced":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            query = arguments.get("query")
-            if not query:
-                raise ValueError("query is required")
-
-            result = await run_client_call(
-                client.search_tickets_enhanced,
-                query=query,
-                regex_pattern=arguments.get("regex_pattern"),
-                fuzzy_term=arguments.get("fuzzy_term"),
-                fuzzy_threshold=arguments.get("fuzzy_threshold", 0.7),
-                proximity_terms=arguments.get("proximity_terms"),
-                proximity_distance=arguments.get("proximity_distance", 5),
-                sort_by=arguments.get("sort_by"),
-                sort_order=arguments.get("sort_order"),
-                limit=arguments.get("limit", 100)
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "build_search_query":
-            result = await run_client_call(
-                client.build_search_query,
-                status=arguments.get("status") if arguments else None,
-                priority=arguments.get("priority") if arguments else None,
-                assignee=arguments.get("assignee") if arguments else None,
-                requester=arguments.get("requester") if arguments else None,
-                organization=arguments.get("organization") if arguments else None,
-                tags=arguments.get("tags") if arguments else None,
-                tags_logic=arguments.get("tags_logic", "OR") if arguments else "OR",
-                exclude_tags=arguments.get("exclude_tags") if arguments else None,
-                created_after=arguments.get("created_after") if arguments else None,
-                created_before=arguments.get("created_before") if arguments else None,
-                updated_after=arguments.get("updated_after") if arguments else None,
-                updated_before=arguments.get("updated_before") if arguments else None,
-                solved_after=arguments.get("solved_after") if arguments else None,
-                solved_before=arguments.get("solved_before") if arguments else None,
-                due_after=arguments.get("due_after") if arguments else None,
-                due_before=arguments.get("due_before") if arguments else None,
-                custom_fields=arguments.get("custom_fields") if arguments else None,
-                subject_contains=arguments.get("subject_contains") if arguments else None,
-                description_contains=arguments.get("description_contains") if arguments else None,
-                comment_contains=arguments.get("comment_contains") if arguments else None
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "get_search_statistics":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            query = arguments.get("query")
-            if not query:
-                raise ValueError("query is required")
-
-            result = await run_client_call(
-                client.get_search_statistics,
-                query=query,
-                sort_by=arguments.get("sort_by"),
-                sort_order=arguments.get("sort_order"),
-                limit=arguments.get("limit", 1000)
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "search_by_date_range":
-            result = await run_client_call(
-                client.search_by_date_range,
-                date_field=arguments.get("date_field", "created") if arguments else "created",
-                range_type=arguments.get("range_type", "custom") if arguments else "custom",
-                start_date=arguments.get("start_date") if arguments else None,
-                end_date=arguments.get("end_date") if arguments else None,
-                relative_period=arguments.get("relative_period") if arguments else None,
-                sort_by=arguments.get("sort_by") if arguments else None,
-                sort_order=arguments.get("sort_order") if arguments else None,
-                limit=arguments.get("limit", 100) if arguments else 100
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "search_by_tags_advanced":
-            result = await run_client_call(
-                client.search_by_tags_advanced,
-                include_tags=arguments.get("include_tags") if arguments else None,
-                exclude_tags=arguments.get("exclude_tags") if arguments else None,
-                tag_logic=arguments.get("tag_logic", "OR") if arguments else "OR",
-                sort_by=arguments.get("sort_by") if arguments else None,
-                sort_order=arguments.get("sort_order") if arguments else None,
-                limit=arguments.get("limit", 100) if arguments else 100
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "get_ticket_bundle_zendesk":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            ticket_id = arguments.get("ticket_id")
-            if ticket_id is None:
-                raise ValueError("ticket_id is required")
-            comment_limit = arguments.get("comment_limit", 50)
-            audit_limit = arguments.get("audit_limit", 100)
-
-            result = await run_client_call(
-                client.get_ticket_bundle,
-                int(ticket_id),
-                comment_limit,
-                audit_limit,
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        elif name == "batch_search_tickets":
-            if not arguments:
-                raise ValueError("Missing arguments")
-            queries = arguments.get("queries")
-            if not queries:
-                raise ValueError("queries is required")
-
-            result = await run_client_call(
-                client.batch_search_tickets,
-                queries=queries,
-                deduplicate=arguments.get("deduplicate", True),
-                sort_by=arguments.get("sort_by"),
-                sort_order=arguments.get("sort_order"),
-                limit_per_query=arguments.get("limit_per_query", 100)
-            )
-            return [types.TextContent(
-                type="text",
-                text=json.dumps(result, indent=2)
-            )]
-
-        else:
-            raise ValueError(f"Unknown tool: {name}")
-
+        
+        # Dispatch to registered handler
+        handler = TOOL_HANDLERS.get(name)
+        if handler:
+            return await handler(client, arguments)
+        
+        raise ValueError(f"Unknown tool: {name}")
     except Exception as e:
         return [types.TextContent(
             type="text",

@@ -48,7 +48,7 @@ def test_incremental_tickets_pagination_respects_max_results(monkeypatch):
 
     urls = []
 
-    def fake_urlopen(req):
+    def fake_urlopen(req, max_attempts=5):
         url = getattr(req, "full_url", str(req))
         urls.append(url)
         if "/incremental/tickets.json" in url:
@@ -60,7 +60,8 @@ def test_incremental_tickets_pagination_respects_max_results(monkeypatch):
             return DummyResponse(payload)
         raise AssertionError("Unexpected URL: " + url)
 
-    monkeypatch.setattr(zc.urllib.request, "urlopen", fake_urlopen, raising=False)
+    from zendesk_mcp_server.client.base import _urlopen_with_retry
+    monkeypatch.setattr("zendesk_mcp_server.client.base._urlopen_with_retry", fake_urlopen, raising=False)
     monkeypatch.setattr(zc.ZendeskClient, "__init__", _fake_client_init, raising=False)
 
     from zendesk_mcp_server.zendesk_client import ZendeskClient
@@ -87,7 +88,7 @@ def test_incremental_end_of_stream(monkeypatch):
     inject_fake_zenpy()
     import zendesk_mcp_server.zendesk_client as zc
 
-    def fake_urlopen(req):
+    def fake_urlopen(req, max_attempts=5):
         url = getattr(req, "full_url", str(req))
         assert "/incremental/ticket_events.json" in url
         payload = {
@@ -97,7 +98,8 @@ def test_incremental_end_of_stream(monkeypatch):
         }
         return DummyResponse(payload)
 
-    monkeypatch.setattr(zc.urllib.request, "urlopen", fake_urlopen, raising=False)
+    from zendesk_mcp_server.client.base import _urlopen_with_retry
+    monkeypatch.setattr("zendesk_mcp_server.client.base._urlopen_with_retry", fake_urlopen, raising=False)
     monkeypatch.setattr(zc.ZendeskClient, "__init__", _fake_client_init, raising=False)
 
     from zendesk_mcp_server.zendesk_client import ZendeskClient
@@ -116,7 +118,7 @@ def test_clock_skew_and_flooring(monkeypatch):
 
     call_count = {"n": 0}
 
-    def fake_urlopen(req):
+    def fake_urlopen(req, max_attempts=5):
         call_count["n"] += 1
         url = getattr(req, "full_url", str(req))
         assert "/incremental/tickets.json" in url
@@ -127,7 +129,8 @@ def test_clock_skew_and_flooring(monkeypatch):
         }
         return DummyResponse(payload)
 
-    monkeypatch.setattr(zc.urllib.request, "urlopen", fake_urlopen, raising=False)
+    from zendesk_mcp_server.client.base import _urlopen_with_retry
+    monkeypatch.setattr("zendesk_mcp_server.client.base._urlopen_with_retry", fake_urlopen, raising=False)
     monkeypatch.setattr(zc.ZendeskClient, "__init__", _fake_client_init, raising=False)
 
     from zendesk_mcp_server.zendesk_client import ZendeskClient
@@ -151,18 +154,22 @@ def test_rate_limit_handling_retry_after(monkeypatch):
     def fake_sleep(secs):
         sleeps.append(secs)
 
-    def fake_urlopen(req):
+    def fake_urlopen(req, max_attempts=5):
         url = getattr(req, "full_url", str(req))
         if calls["n"] == 0:
             calls["n"] += 1
             # First call: 429 with Retry-After 2
-            raise HTTPError(url, 429, "Too Many Requests", {"Retry-After": "2"}, io.BytesIO(b""))
+            # Create a proper HTTPError that mimics urllib's behavior
+            error = HTTPError(url, 429, "Too Many Requests", {"Retry-After": "2"}, io.BytesIO(b""))
+            error.headers = {"Retry-After": "2"}
+            raise error
         calls["n"] += 1
         payload = {"ticket_events": [{"id": "e1"}], "end_of_stream": True}
         return DummyResponse(payload)
 
     monkeypatch.setattr(time_mod, "sleep", fake_sleep)
-    monkeypatch.setattr(zc.urllib.request, "urlopen", fake_urlopen, raising=False)
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen, raising=False)
     monkeypatch.setattr(zc.ZendeskClient, "__init__", _fake_client_init, raising=False)
 
     from zendesk_mcp_server.zendesk_client import ZendeskClient
@@ -182,7 +189,7 @@ def test_cursor_cache_usage(monkeypatch):
 
     urls = []
 
-    def fake_urlopen(req):
+    def fake_urlopen(req, max_attempts=5):
         url = getattr(req, "full_url", str(req))
         urls.append(url)
         payload = {
@@ -204,7 +211,8 @@ def test_cursor_cache_usage(monkeypatch):
         def set_cursor(self, key, value):
             self.set_calls.append((key, value))
 
-    monkeypatch.setattr(zc.urllib.request, "urlopen", fake_urlopen, raising=False)
+    from zendesk_mcp_server.client.base import _urlopen_with_retry
+    monkeypatch.setattr("zendesk_mcp_server.client.base._urlopen_with_retry", fake_urlopen, raising=False)
     monkeypatch.setattr(zc.ZendeskClient, "__init__", _fake_client_init, raising=False)
 
     from zendesk_mcp_server.zendesk_client import ZendeskClient

@@ -109,9 +109,10 @@ class TestExportSortingRegressions:
             assert out4b["count"] == 1
 
             # batch_search_tickets
-            out5 = self.client.batch_search_tickets(["status:open", "priority:high"], sort_by="updated_at")
+            import asyncio
+            out5 = asyncio.run(self.client.batch_search_tickets(["status:open", "priority:high"], sort_by="updated_at"))
             assert out5["queries_executed"] == 2
-            out5b = self.client.batch_search_tickets(["status:open", "priority:high"])
+            out5b = asyncio.run(self.client.batch_search_tickets(["status:open", "priority:high"]))
             assert out5b["queries_executed"] == 2
 
             # Ensure wrapper calls still routed through export method

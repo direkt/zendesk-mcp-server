@@ -423,6 +423,63 @@ Analyze search results and return aggregated statistics
   - Identifies top performers and common patterns
   - Useful for dashboards and management reporting
 
+### get_case_volume_analytics
+
+Comprehensive ticket analytics including volumes, response times, resolution times, channel breakdowns, assignment metrics, status transitions, and satisfaction scores.
+
+- Input:
+  - `start_date` (string, optional): Inclusive start date (`YYYY-MM-DD`). Defaults to the earliest date covering the last 13 weeks and 12 months.
+  - `end_date` (string, optional): Inclusive end date (`YYYY-MM-DD`). Defaults to today (UTC).
+  - `max_results` (integer, optional): Optional cap on the number of tickets analyzed.
+  - `include_metrics` (array, optional): Metric types to include. Options: `response_times`, `resolution_times`, `channels`, `forms`, `assignments`, `status_transitions`, `satisfaction`. Defaults to all metrics.
+  - `group_by` (array, optional): Dimensions to group by. Options: `channel`, `form`, `priority`, `type`, `group_id`, `tags`, `requester`, `organization`, `custom_fields`.
+  - `filter_by_status` (array, optional): Filter tickets to specific statuses (e.g., `['open', 'solved']`).
+  - `filter_by_priority` (array, optional): Filter tickets to specific priorities (e.g., `['high', 'urgent']`).
+  - `filter_by_tags` (array, optional): Filter tickets to those containing any of the specified tags (e.g., `['bug', 'urgent']`).
+  - `time_bucket` (string, optional): Time bucketing granularity. Options: `daily`, `weekly`, `monthly`. Defaults to `weekly`.
+
+- Output: Returns comprehensive analytics payload containing:
+  - `time_series`: Ticket counts based on selected time_bucket (daily/weekly/monthly)
+  - `weekly_counts`: Ticket counts per ISO week (zero-filled for missing weeks)
+  - `monthly_counts`: Ticket counts per month
+  - `daily_counts`: Ticket counts per day
+  - `technician_weekly_counts`: Weekly breakdown per assignee, including unassigned tickets
+  - `requester_weekly_counts`: Weekly breakdown per requester (ticket volume by requester over time)
+  - `requester_breakdown`: Total ticket counts by requester ID (sorted by volume)
+  - `organization_weekly_counts`: Weekly breakdown per organization (ticket volume by organization over time)
+  - `organization_breakdown`: Total ticket counts by organization ID (sorted by volume)
+  - `custom_field_breakdown`: Ticket counts by custom field ID and value (top 20 values per field)
+  - `custom_field_weekly_counts`: Weekly breakdown per custom field value (top 100 field:value combinations)
+  - `totals`: Overall ticket totals, assignment breakdown, status/priority/type distribution
+  - `response_time_metrics`: Statistics for reply time, agent wait time, requester wait time (avg, min, max, median)
+  - `resolution_time_metrics`: Statistics for first resolution, full resolution, and on-hold times
+  - `channel_breakdown`: Ticket counts by creation channel (email, web, mobile, api, chat, etc.)
+  - `form_breakdown`: Ticket counts by ticket form ID
+  - `group_breakdown`: Ticket counts by group ID
+  - `assignment_metrics`: Assignment time statistics
+  - `status_transition_metrics`: Status change counts and time-in-status statistics
+  - `satisfaction_metrics`: Average satisfaction score, total ratings, and score distribution
+  - `tag_breakdown`: Ticket counts by tag (sorted by frequency)
+  - `tag_weekly_counts`: Weekly breakdown per tag (top 50 tags by volume)
+  - `grouped_breakdowns`: Additional breakdowns when `group_by` is specified
+  - `range`: Metadata describing the analyzed date range and bucket counts
+
+- Notes:
+  - **Time Metrics**: Response and resolution times are extracted from Zendesk's metric_set object. Not all tickets have complete metric data.
+  - **Channel/Source**: Extracted from the `via` object. Common channels include email, web, mobile, api, chat, voice, twitter, facebook.
+  - **Satisfaction**: Only includes tickets with satisfaction ratings. Scores range from 1-5 (good) or -1 (bad).
+  - **Time Buckets**: 
+    - `daily`: Provides day-by-day counts (useful for short-term analysis)
+    - `weekly`: ISO week-based buckets (Monday starts), default
+    - `monthly`: Calendar month buckets
+  - **Filtering**: Filters are applied client-side after fetching tickets. Use Zendesk search queries for server-side filtering when possible.
+  - **Grouping**: Multiple dimensions can be grouped simultaneously. Results include separate breakdowns for each dimension.
+  - **Tags**: Tag analytics are automatically included. Use `filter_by_tags` to analyze specific tags, or `group_by: ['tags']` to see tag-based groupings. Tag weekly counts show how tag usage trends over time.
+  - **Requesters**: Requester analytics track ticket volume by requester over time. Use `group_by: ['requester']` to see requester-based groupings. Helps identify most active requesters and trends.
+  - **Organizations**: Organization analytics track ticket volume by organization over time. Use `group_by: ['organization']` to see organization-based groupings. Useful for account management and understanding organizational ticket patterns.
+  - **Custom Fields**: Custom field analytics automatically extract and track all custom field values. Breakdowns show ticket counts by field ID and value, with weekly trends for top values. Use `group_by: ['custom_fields']` to see custom field-based groupings. Limited to top 20 values per field and top 100 field:value combinations in weekly counts to manage response size.
+  - Useful for capacity planning, workload trend analysis, SLA monitoring, agent performance evaluation, account management, and staffing decisions.
+
 ## Advanced Filtering Tools
 
 ### search_by_date_range

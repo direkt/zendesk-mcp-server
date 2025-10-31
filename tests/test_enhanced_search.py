@@ -72,7 +72,7 @@ class TestEnhancedSearch:
         assert len(result) == 1
         assert result[0]['id'] == 1
         assert 'regex_match_field' in result[0]
-        assert 'regex_match' in result[0]
+        assert 'regex_pattern' in result[0]
 
     def test_apply_fuzzy_filter(self):
         """Test _apply_fuzzy_filter method."""
@@ -196,12 +196,13 @@ class TestEnhancedSearch:
             assert "tags:urgent" in query
             assert "-tags:spam" in query
 
-    def test_batch_search_tickets(self):
+    @pytest.mark.asyncio
+    async def test_batch_search_tickets(self):
         """Test batch_search_tickets method."""
         with patch.object(self.client, 'search_tickets_export') as mock_search:
             mock_search.return_value = {'tickets': [{'id': 1}], 'count': 1}
             
-            result = self.client.batch_search_tickets(
+            result = await self.client.batch_search_tickets(
                 queries=["status:open", "priority:high"],
                 deduplicate=True
             )

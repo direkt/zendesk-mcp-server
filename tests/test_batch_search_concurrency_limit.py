@@ -50,9 +50,10 @@ def test_batch_search_limited_to_three_concurrent(monkeypatch):
 
     monkeypatch.setattr(ZendeskClient, "search_tickets_export", fake_export, raising=False)
 
+    import asyncio
     client = ZendeskClient("s", "e", "t")
     queries = [f"q{i}" for i in range(7)]
-    res = client.batch_search_tickets(queries=queries, deduplicate=False, sort_by=None, sort_order=None, limit_per_query=1)
+    res = asyncio.run(client.batch_search_tickets(queries=queries, deduplicate=False, sort_by=None, sort_order=None, limit_per_query=1))
 
     # Ensure the batch completed and returned results for each query
     assert res["queries_executed"] == len(queries)

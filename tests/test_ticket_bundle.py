@@ -133,7 +133,8 @@ def test_get_ticket_bundle_happy_path(monkeypatch):
     router.route('/organizations/33.json', lambda url: make_response({'organization': {'id': 33, 'name': 'Acme'}}))
 
     # Patch urlopen
-    monkeypatch.setattr(zc.urllib.request, "urlopen", router, raising=False)
+    from zendesk_mcp_server.client.base import _urlopen_with_retry
+    monkeypatch.setattr("zendesk_mcp_server.client.base._urlopen_with_retry", router, raising=False)
 
     client = ZendeskClient("s", "e", "t")
     bundle = client.get_ticket_bundle(123)
@@ -200,7 +201,8 @@ def test_get_ticket_bundle_pagination(monkeypatch):
     router.route('/audits.json', audits_handler)
 
     # No user/org lookups needed for this test
-    monkeypatch.setattr(zc.urllib.request, "urlopen", router, raising=False)
+    from zendesk_mcp_server.client.base import _urlopen_with_retry
+    monkeypatch.setattr("zendesk_mcp_server.client.base._urlopen_with_retry", router, raising=False)
 
     client = ZendeskClient("s", "e", "t")
     bundle = client.get_ticket_bundle(555, comment_limit=2, audit_limit=1)
@@ -226,7 +228,8 @@ def test_get_ticket_bundle_missing_context(monkeypatch):
     router.route('/comments.json', lambda url: make_response({'comments': [], 'next_page': None}))
     router.route('/audits.json', lambda url: make_response({'audits': [], 'next_page': None}))
     router.route('/users/11.json', lambda url: make_response({'user': {'id': 11, 'name': 'Alice'}}))
-    monkeypatch.setattr(zc.urllib.request, "urlopen", router, raising=False)
+    from zendesk_mcp_server.client.base import _urlopen_with_retry
+    monkeypatch.setattr("zendesk_mcp_server.client.base._urlopen_with_retry", router, raising=False)
 
     client = ZendeskClient("s", "e", "t")
     bundle = client.get_ticket_bundle(999)
@@ -256,7 +259,8 @@ def test_get_ticket_bundle_api_failures(monkeypatch):
             return make_response({'audits': [], 'next_page': None})
         return make_response({})
 
-    monkeypatch.setattr(zc.urllib.request, "urlopen", failing_urlopen, raising=False)
+    from zendesk_mcp_server.client.base import _urlopen_with_retry
+    monkeypatch.setattr("zendesk_mcp_server.client.base._urlopen_with_retry", failing_urlopen, raising=False)
 
     client = ZendeskClient("s", "e", "t")
     bundle = client.get_ticket_bundle(42)
@@ -276,7 +280,8 @@ def test_get_ticket_bundle_empty_ticket(monkeypatch):
     router = UrlRouter()
     router.route('/comments.json', lambda url: make_response({'comments': [], 'next_page': None}))
     router.route('/audits.json', lambda url: make_response({'audits': [], 'next_page': None}))
-    monkeypatch.setattr(zc.urllib.request, "urlopen", router, raising=False)
+    from zendesk_mcp_server.client.base import _urlopen_with_retry
+    monkeypatch.setattr("zendesk_mcp_server.client.base._urlopen_with_retry", router, raising=False)
 
     client = ZendeskClient("s", "e", "t")
     bundle = client.get_ticket_bundle(1)
