@@ -12,6 +12,36 @@ wheels/
 # Intellij Idea files
 .idea/
 
+# Environment and configuration files
 .env
 .env.prod
 .env.dev
+.env.local
+
+# Cache files (Zendesk API response caches)
+.channels_cache_v2.json
+.users_cache.json
+*.cache.json
+.cache/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE and editor files
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# Test and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS-specific
+Thumbs.db
+*.log
