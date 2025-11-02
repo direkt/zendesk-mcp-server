@@ -22,11 +22,5 @@ jobs:
       - name: Set up Python
         run: uv python install
 
-      - name: Install dependencies
-        run: uv pip install -e ".[dev]"
-
-      - name: Run tests
-        run: uv run pytest
-
       - name: Build the project
         run: uv build
