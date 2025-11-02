@@ -22,11 +22,21 @@ from zendesk_mcp_server.client.base import _urlopen_with_retry
 
 class TicketMixin:
     """Mixin providing ticket-related methods."""
-    
+
     def get_ticket(self, ticket_id: int) -> Dict[str, Any]:
         """Query a ticket by its ID."""
         try:
             ticket = self.client.tickets(id=ticket_id)
+
+            # Extract satisfaction rating if present
+            satisfaction = getattr(ticket, 'satisfaction_rating', None)
+            satisfaction_data = None
+            if satisfaction:
+                satisfaction_data = {
+                    'score': getattr(satisfaction, 'score', None),
+                    'comment': getattr(satisfaction, 'comment', None),
+                }
+
             return {
                 'id': ticket.id,
                 'subject': ticket.subject,
@@ -37,7 +47,8 @@ class TicketMixin:
                 'updated_at': str(ticket.updated_at),
                 'requester_id': ticket.requester_id,
                 'assignee_id': ticket.assignee_id,
-                'organization_id': ticket.organization_id
+                'organization_id': ticket.organization_id,
+                'satisfaction_rating': satisfaction_data,
             }
         except Exception as e:
             if isinstance(e, ZendeskError):
@@ -68,7 +79,7 @@ class TicketMixin:
         max_results: int | None = None,
     ) -> tuple[list[dict], bool, int | None]:
         """Incremental Tickets API wrapper.
-        
+
         Args:
             start_time: Unix epoch seconds or datetime to start from (inclusive).
             include: Optional list of include values; passed as CSV to include= query.
@@ -92,7 +103,7 @@ class TicketMixin:
         max_results: int | None = None,
     ) -> tuple[list[dict], bool, int | None]:
         """Incremental Ticket Events API wrapper.
-        
+
         Returns: (items, has_more, next_start_time)
         """
         return self._incremental_fetch(
@@ -104,9 +115,198 @@ class TicketMixin:
             cursor_endpoint_key="incremental_ticket_events",
         )
 
+    def get_ticket_metric_events(self, ticket_id: int) -> Dict[str, Any]:
+        """Fetch ticket metric events for a specific ticket.
+
+        Metric events contain SLA breach information and timing data.
+
+        Returns a dict with metric_events, count, and has_more.
+        """
+        try:
+            metric_events: List[Dict[str, Any]] = []
+            has_more = False
+            url = f"{self.base_url}/tickets/{ticket_id}/metric_events.json"
+
+            while url:
+                data = self._get_json_url(url)
+                page_events = data.get('metric_events') or []
+                metric_events.extend(page_events)
+                url = data.get('next_page')
+                if not url:
+                    break
+
+            return {
+                'metric_events': metric_events,
+                'count': len(metric_events),
+                'has_more': has_more,
+            }
+        except Exception as e:
+            if isinstance(e, ZendeskError):
+                raise
+            raise ZendeskAPIError(f"Failed to get metric events for ticket {ticket_id}: {str(e)}")
+
+    def incremental_ticket_metric_events(
+        self,
+        start_time: int | datetime,
+        max_results: int | None = None,
+    ) -> tuple[list[dict], bool, int | None]:
+        """Incremental Ticket Metric Events API wrapper.
+
+        Fetches metric events across all tickets for bulk SLA analysis.
+
+        Args:
+            start_time: Unix epoch seconds or datetime to start from (inclusive).
+            max_results: Global cap across pages; fetches until end if None.
+
+        Returns: (items, has_more, next_start_time)
+        """
+        return self._incremental_fetch(
+            path="/incremental/ticket_metric_events.json",
+            items_key="ticket_metric_events",
+            start_time=start_time,
+            include_csv=None,
+            max_results=max_results,
+            cursor_endpoint_key="incremental_ticket_metric_events",
+        )
+
+    def get_ticket_csat_survey_responses(self, ticket_id: int) -> Dict[str, Any]:
+        """Fetch CSAT survey responses for a specific ticket.
+
+        Returns CSAT survey responses including scores, comments, and timestamps.
+        This is the newer CSAT API (recommended over legacy satisfaction_rating).
+
+        Returns a dict with csat_survey_responses, count, and has_more.
+        """
+        try:
+            responses: List[Dict[str, Any]] = []
+            has_more = False
+            url = f"{self.base_url}/tickets/{ticket_id}/csat_survey_responses.json"
+
+            while url:
+                data = self._get_json_url(url)
+                page_responses = data.get('csat_survey_responses') or []
+                responses.extend(page_responses)
+                url = data.get('next_page')
+                if not url:
+                    break
+
+            return {
+                'csat_survey_responses': responses,
+                'count': len(responses),
+                'has_more': has_more,
+            }
+        except Exception as e:
+            if isinstance(e, ZendeskError):
+                raise
+            raise ZendeskAPIError(f"Failed to get CSAT survey responses for ticket {ticket_id}: {str(e)}")
+
+    def search_csat_survey_responses(
+        self,
+        ticket_id: int | None = None,
+        score: int | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Search CSAT survey responses with filtering options.
+
+        Args:
+            ticket_id: Optional ticket ID to filter by.
+            score: Optional CSAT score to filter by (1-5 scale, typically).
+            created_after: Optional ISO8601 date string to filter responses created after.
+            created_before: Optional ISO8601 date string to filter responses created before.
+            limit: Maximum number of results to return (default 100).
+
+        Returns a dict with csat_survey_responses, count, and has_more.
+        """
+        try:
+            params: Dict[str, Any] = {}
+            if ticket_id:
+                # If ticket_id provided, use ticket-specific endpoint
+                return self.get_ticket_csat_survey_responses(ticket_id)
+
+            if score is not None:
+                params['score'] = str(score)
+            if created_after:
+                params['created_after'] = created_after
+            if created_before:
+                params['created_before'] = created_before
+            params['per_page'] = min(limit, 100)
+
+            responses: List[Dict[str, Any]] = []
+            has_more = False
+            url = f"{self.base_url}/csat_survey_responses.json"
+            if params:
+                query_string = urllib.parse.urlencode(params)
+                url = f"{url}?{query_string}"
+
+            page_count = 0
+            while url and len(responses) < limit:
+                data = self._get_json_url(url)
+                page_responses = data.get('csat_survey_responses') or []
+                responses.extend(page_responses[:limit - len(responses)])
+                url = data.get('next_page')
+                if len(responses) >= limit:
+                    has_more = bool(url)
+                    break
+                if not url:
+                    break
+
+            return {
+                'csat_survey_responses': responses,
+                'count': len(responses),
+                'has_more': has_more,
+            }
+        except Exception as e:
+            if isinstance(e, ZendeskError):
+                raise
+            raise ZendeskAPIError(f"Failed to search CSAT survey responses: {str(e)}")
+    def list_survey_responses_guide(
+        self,
+        created_at_start_ms: int | None = None,
+        created_at_end_ms: int | None = None,
+        subject_ticket_ids: List[int] | None = None,
+        responder_ids: List[int] | None = None,
+        cursor: str | None = None,
+    ) -> Dict[str, Any]:
+        """Call Zendesk Guide CSAT Survey Responses API.
+
+        Wraps GET /api/v2/guide/survey_responses with supported filters.
+        Returns raw response with keys: 'survey_responses' and 'meta'.
+        """
+        try:
+            params: Dict[str, Any] = {}
+            if created_at_start_ms is not None:
+                params["filter[created_at_start]"] = str(created_at_start_ms)
+            if created_at_end_ms is not None:
+                params["filter[created_at_end]"] = str(created_at_end_ms)
+            if subject_ticket_ids:
+                zrns = [f"zen:ticket:{int(tid)}" for tid in subject_ticket_ids if tid is not None]
+                if zrns:
+                    params["filter[subject_zrns]"] = ",".join(zrns)
+            if responder_ids:
+                params["filter[responder_ids]"] = ",".join(str(int(rid)) for rid in responder_ids if rid is not None)
+            if cursor:
+                params["page[after]"] = cursor
+
+            # Perform request
+            data = self._get_json("/guide/survey_responses", params=params)
+            # Ensure expected structure
+            survey_responses = data.get("survey_responses") or []
+            meta = data.get("meta") or {}
+            return {
+                "survey_responses": survey_responses,
+                "meta": meta,
+            }
+        except Exception as e:
+            if isinstance(e, ZendeskError):
+                raise
+            raise ZendeskAPIError(f"Failed to list survey responses: {str(e)}")
+
+
     def get_ticket_audits(self, ticket_id: int, limit: int = 100) -> Dict[str, Any]:
         """Fetch ticket audits with pagination up to the given limit.
-        
+
         Returns a dict with audits, count, and has_more.
         """
         try:
@@ -138,7 +338,7 @@ class TicketMixin:
 
     def _get_ticket_comments_with_attachments(self, ticket_id: int, limit: int = 50) -> Dict[str, Any]:
         """Fetch ticket comments (via direct API) including attachments, up to limit.
-        
+
         Returns a dict with comments (normalized), count, has_more.
         """
         try:
@@ -187,6 +387,248 @@ class TicketMixin:
             if isinstance(e, ZendeskError):
                 raise
             raise ZendeskAPIError(f"Failed to get comments for ticket {ticket_id}: {str(e)}")
+
+    def get_tickets_with_csat_this_week(self) -> Dict[str, Any]:
+        """Fetch tickets with CSAT scores from this week.
+
+        Returns tickets that were solved this week and have CSAT satisfaction ratings.
+
+        Returns:
+            Dict containing tickets with CSAT data and summary statistics
+        """
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            # Calculate this week's date range (Monday to Sunday)
+            today = datetime.now(timezone.utc)
+            # Monday is 0, Sunday is 6
+            days_since_monday = today.weekday()
+            week_start = today - timedelta(days=days_since_monday)
+            week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+            week_end = week_start + timedelta(days=7)
+
+            # Format dates for Zendesk query
+            start_str = week_start.strftime('%Y-%m-%d')
+            end_str = week_end.strftime('%Y-%m-%d')
+
+            # Search for solved tickets updated this week
+            query = f"status:solved updated>={start_str} updated<{end_str}"
+
+            search_result = self.search_tickets_export(
+                query=query,
+                sort_by="updated_at",
+                sort_order="desc",
+                max_results=500
+            )
+            tickets = search_result.get('tickets', [])
+
+            if not tickets:
+                return {
+                    'tickets': [],
+                    'count': 0,
+                    'week_start': start_str,
+                    'week_end': end_str,
+                    'summary': {
+                        'total_with_csat': 0,
+                        'total_with_comments': 0,
+                        'score_distribution': {}
+                    }
+                }
+
+            # Collect tickets with CSAT data
+            tickets_with_csat = []
+
+            for ticket in tickets:
+                ticket_id = ticket.get('id')
+
+                # Check for legacy satisfaction_rating
+                satisfaction = ticket.get('satisfaction_rating')
+                if satisfaction and satisfaction.get('score') is not None:
+                    score = satisfaction.get('score')
+                    comment = satisfaction.get('comment')
+
+                    tickets_with_csat.append({
+                        'ticket_id': ticket_id,
+                        'subject': ticket.get('subject'),
+                        'status': ticket.get('status'),
+                        'priority': ticket.get('priority'),
+                        'requester_id': ticket.get('requester_id'),
+                        'assignee_id': ticket.get('assignee_id'),
+                        'score': score,
+                        'comment': comment,
+                        'created_at': ticket.get('created_at'),
+                        'updated_at': ticket.get('updated_at'),
+                        'source': 'legacy_satisfaction_rating'
+                    })
+                else:
+                    # Try to fetch CSAT survey responses for this ticket
+                    try:
+                        csat_responses = self.get_ticket_csat_survey_responses(ticket_id)
+                        responses = csat_responses.get('csat_survey_responses', [])
+
+                        for response in responses:
+                            score = response.get('score')
+                            if score is not None:
+                                comment = response.get('comment')
+                                tickets_with_csat.append({
+                                    'ticket_id': ticket_id,
+                                    'subject': ticket.get('subject'),
+                                    'status': ticket.get('status'),
+                                    'priority': ticket.get('priority'),
+                                    'requester_id': ticket.get('requester_id'),
+                                    'assignee_id': ticket.get('assignee_id'),
+                                    'score': score,
+                                    'comment': comment,
+                                    'created_at': ticket.get('created_at'),
+                                    'updated_at': ticket.get('updated_at'),
+                                    'response_created_at': response.get('created_at'),
+                                    'source': 'csat_survey_response'
+                                })
+                    except Exception:
+                        # Skip if no CSAT survey responses
+                        pass
+
+            # Calculate statistics
+            scores = [t['score'] for t in tickets_with_csat if t.get('score') is not None]
+            comments_count = sum(1 for t in tickets_with_csat if t.get('comment'))
+
+            # Score distribution
+            score_dist = {}
+            for score in scores:
+                score_str = str(score)
+                score_dist[score_str] = score_dist.get(score_str, 0) + 1
+
+            return {
+                'tickets': tickets_with_csat,
+                'count': len(tickets_with_csat),
+                'week_start': start_str,
+                'week_end': end_str,
+                'summary': {
+                    'total_with_csat': len(tickets_with_csat),
+                    'total_with_comments': comments_count,
+                    'score_distribution': score_dist
+                }
+            }
+        except Exception as e:
+            if isinstance(e, ZendeskError):
+                raise
+            raise ZendeskAPIError(f"Failed to get tickets with CSAT this week: {str(e)}")
+
+    def get_recent_tickets_with_csat(self, limit: int = 20) -> Dict[str, Any]:
+        """Fetch recent solved tickets with CSAT scores and comments.
+
+        Returns the most recent tickets that have CSAT satisfaction ratings,
+        including any comments provided by customers.
+
+        Args:
+            limit: Maximum number of tickets to return (default 20)
+
+        Returns:
+            Dict containing tickets with CSAT data and summary statistics
+        """
+        try:
+            # Search for solved tickets, sorted by updated_at descending
+            search_result = self.search_tickets_export(
+                query="status:solved",
+                sort_by="updated_at",
+                sort_order="desc",
+                max_results=min(limit * 5, 500)  # Get more candidates to filter
+            )
+            tickets = search_result.get('tickets', [])
+
+            if not tickets:
+                return {
+                    'tickets': [],
+                    'count': 0,
+                    'summary': {
+                        'total_with_csat': 0,
+                        'total_with_comments': 0,
+                        'score_distribution': {}
+                    }
+                }
+
+            # Collect tickets with CSAT data
+            tickets_with_csat = []
+
+            for ticket in tickets:
+                if len(tickets_with_csat) >= limit:
+                    break
+
+                ticket_id = ticket.get('id')
+
+                # Check for legacy satisfaction_rating
+                satisfaction = ticket.get('satisfaction_rating')
+                if satisfaction and satisfaction.get('score') is not None:
+                    score = satisfaction.get('score')
+                    comment = satisfaction.get('comment')
+
+                    tickets_with_csat.append({
+                        'ticket_id': ticket_id,
+                        'subject': ticket.get('subject'),
+                        'status': ticket.get('status'),
+                        'priority': ticket.get('priority'),
+                        'requester_id': ticket.get('requester_id'),
+                        'assignee_id': ticket.get('assignee_id'),
+                        'score': score,
+                        'comment': comment,
+                        'created_at': ticket.get('created_at'),
+                        'updated_at': ticket.get('updated_at'),
+                        'source': 'legacy_satisfaction_rating'
+                    })
+                else:
+                    # Try to fetch CSAT survey responses for this ticket
+                    try:
+                        csat_responses = self.get_ticket_csat_survey_responses(ticket_id)
+                        responses = csat_responses.get('csat_survey_responses', [])
+
+                        for response in responses:
+                            if len(tickets_with_csat) >= limit:
+                                break
+
+                            score = response.get('score')
+                            if score is not None:
+                                comment = response.get('comment')
+                                tickets_with_csat.append({
+                                    'ticket_id': ticket_id,
+                                    'subject': ticket.get('subject'),
+                                    'status': ticket.get('status'),
+                                    'priority': ticket.get('priority'),
+                                    'requester_id': ticket.get('requester_id'),
+                                    'assignee_id': ticket.get('assignee_id'),
+                                    'score': score,
+                                    'comment': comment,
+                                    'created_at': ticket.get('created_at'),
+                                    'updated_at': ticket.get('updated_at'),
+                                    'response_created_at': response.get('created_at'),
+                                    'source': 'csat_survey_response'
+                                })
+                    except Exception:
+                        # Skip if no CSAT survey responses
+                        pass
+
+            # Calculate statistics
+            scores = [t['score'] for t in tickets_with_csat if t.get('score') is not None]
+            comments_count = sum(1 for t in tickets_with_csat if t.get('comment'))
+
+            # Score distribution
+            score_dist = {}
+            for score in scores:
+                score_str = str(score)
+                score_dist[score_str] = score_dist.get(score_str, 0) + 1
+
+            return {
+                'tickets': tickets_with_csat,
+                'count': len(tickets_with_csat),
+                'summary': {
+                    'total_with_csat': len(tickets_with_csat),
+                    'total_with_comments': comments_count,
+                    'score_distribution': score_dist
+                }
+            }
+        except Exception as e:
+            if isinstance(e, ZendeskError):
+                raise
+            raise ZendeskAPIError(f"Failed to get recent tickets with CSAT: {str(e)}")
 
     def get_ticket_bundle(self, ticket_id: int, comment_limit: int = 50, audit_limit: int = 100) -> Dict[str, Any]:
         """Consolidate ticket, audits, comments(with attachments), and requester/assignee/org context

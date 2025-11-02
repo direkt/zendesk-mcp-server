@@ -6,7 +6,7 @@ from zendesk_mcp_server.exceptions import ZendeskError, ZendeskAPIError, Zendesk
 
 class RelationshipsMixin:
     """Mixin providing ticket relationship methods."""
-    
+
     def find_related_tickets(self, ticket_id: int, limit: int = 100) -> Dict[str, Any]:
         """Find tickets related to the given ticket by subject similarity, same requester, or same organization."""
         try:

@@ -8,6 +8,7 @@ A Model Context Protocol server for Zendesk.
 This server provides a comprehensive integration with Zendesk. It offers:
 
 - Tools for retrieving and managing Zendesk tickets and comments
+- SLA policy integration and breach detection for proactive support management
 - Specialized prompts for ticket analysis and response drafting
 - Full access to the Zendesk Help Center articles as knowledge base
 
@@ -547,3 +548,171 @@ Execute multiple searches concurrently and return grouped results
   - Useful for dashboards and multi-criteria reporting
   - Can deduplicate results across queries
   - Provides execution metrics for performance monitoring
+
+### get_sla_policies
+
+Retrieve all SLA policies configured in Zendesk
+
+- Input: None
+
+- Output: Returns all SLA policies with their configurations including targets for first reply time, next reply time, and resolution time
+
+- Notes:
+  - Useful for understanding SLA requirements and thresholds
+  - See [SLA Functionality Documentation](docs/SLA_FUNCTIONALITY.md) for detailed usage
+
+### get_sla_policy
+
+Retrieve a specific SLA policy by ID
+
+- Input:
+  - `policy_id` (integer, required): The ID of the SLA policy to retrieve
+
+- Output: Returns detailed SLA policy configuration including targets, conditions, and business hours settings
+
+### get_ticket_sla_status
+
+Get comprehensive SLA status and breach information for a specific ticket
+
+- Input:
+  - `ticket_id` (integer, required): The ID of the ticket to check
+
+- Output: Returns SLA status including:
+  - Overall status (ok, at_risk, or breached)
+  - List of breaches with timestamps and policy details
+  - Active SLA policies
+  - At-risk metrics
+
+- Notes:
+  - Uses Ticket Metric Events API to determine breach status
+  - Tracks first reply time, next reply time, and resolution time breaches
+  - See [SLA Functionality Documentation](docs/SLA_FUNCTIONALITY.md) for detailed usage
+
+### search_tickets_with_sla_breaches
+
+Search for tickets that have breached their SLA targets
+
+- Input:
+  - `breach_type` (string, optional): Filter by specific breach type (first_reply_time, next_reply_time, resolution_time)
+  - `status` (string, optional): Filter by ticket status
+  - `priority` (string, optional): Filter by ticket priority
+  - `limit` (integer, optional): Maximum number of tickets to return (default 100)
+
+- Output: Returns tickets with SLA breaches, each including detailed breach information
+
+- Notes:
+  - Useful for SLA compliance monitoring
+  - Can filter by specific breach types
+  - Each ticket includes full SLA status details
+
+### get_tickets_at_risk_of_breach
+
+Find tickets that are at risk of breaching their SLA but haven't breached yet
+
+- Input:
+  - `status` (string, optional): Filter by ticket status (default: open and pending)
+  - `priority` (string, optional): Filter by ticket priority
+  - `limit` (integer, optional): Maximum number of tickets to return (default 50)
+
+- Output: Returns tickets at risk of SLA breach with risk details
+
+- Notes:
+  - Useful for proactive SLA management
+  - Helps identify tickets that need immediate attention
+  - Default filters to open/pending tickets for active monitoring
+
+### get_recent_tickets_with_csat
+
+Retrieve recent solved tickets with CSAT (Customer Satisfaction) scores and comments
+
+- Input:
+  - `limit` (integer, optional): Maximum number of tickets to return (default 20)
+
+- Output: Returns recent solved tickets with CSAT scores and customer comments, including:
+  - Ticket ID, subject, status, priority
+  - CSAT score and any customer comments
+  - Summary statistics (total with CSAT, total with comments, score distribution)
+
+- Example Output:
+  ```json
+  {
+    "tickets": [
+      {
+        "ticket_id": 137518,
+        "subject": "Dremio Cloud - PowerBI Connection error after enabling SSO",
+        "status": "solved",
+        "priority": "normal",
+        "score": "good",
+        "comment": "Great support team!",
+        "created_at": "2024-01-15T10:00:00Z",
+        "updated_at": "2024-01-16T14:30:00Z",
+        "source": "legacy_satisfaction_rating"
+      }
+    ],
+    "count": 20,
+    "summary": {
+      "total_with_csat": 20,
+      "total_with_comments": 5,
+      "score_distribution": {
+        "good": 8,
+        "offered": 10,
+        "unoffered": 2
+      }
+    }
+  }
+  ```
+
+- Notes:
+  - Retrieves solved tickets with satisfaction ratings
+  - Includes both legacy satisfaction ratings and CSAT survey responses
+  - Useful for analyzing customer satisfaction trends and feedback
+  - Comments are included when available
+
+### get_tickets_with_csat_this_week
+
+Retrieve all tickets with CSAT scores from this week
+
+- Input: None
+
+- Output: Returns all solved tickets updated this week that have CSAT scores, including:
+  - Ticket ID, subject, status, priority
+  - CSAT score and any customer comments
+  - Week start and end dates
+  - Summary statistics (total with CSAT, total with comments, score distribution)
+
+- Example Output:
+  ```json
+  {
+    "tickets": [
+      {
+        "ticket_id": 137518,
+        "subject": "Dremio Cloud - PowerBI Connection error after enabling SSO",
+        "status": "solved",
+        "priority": "normal",
+        "score": "good",
+        "comment": null,
+        "created_at": "2025-10-27T17:14:10Z",
+        "updated_at": "2025-10-31T10:19:28Z",
+        "source": "legacy_satisfaction_rating"
+      }
+    ],
+    "count": 76,
+    "week_start": "2025-10-27",
+    "week_end": "2025-11-03",
+    "summary": {
+      "total_with_csat": 76,
+      "total_with_comments": 1,
+      "score_distribution": {
+        "good": 7,
+        "offered": 66,
+        "unoffered": 3
+      }
+    }
+  }
+  ```
+
+- Notes:
+  - Automatically calculates this week's date range (Monday to Sunday)
+  - Searches for solved tickets updated during the week
+  - Useful for weekly satisfaction tracking and monitoring
+  - Includes both legacy satisfaction ratings and CSAT survey responses

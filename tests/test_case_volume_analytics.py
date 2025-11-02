@@ -66,7 +66,7 @@ class TestCaseVolumeAnalytics:
             query="created>=2024-01-01 created<=2024-02-15",
             sort_by="created_at",
             sort_order="asc",
-            max_results=None,
+            max_results=10000,
         )
 
         assert result["totals"]["tickets"] == 3

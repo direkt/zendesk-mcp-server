@@ -1015,7 +1015,8 @@ async def handle_list_tools() -> list[types.Tool]:
             name="get_case_volume_analytics",
             description=(
                 "Comprehensive ticket analytics including volumes, response times, resolution times, "
-                "channel breakdowns, assignment metrics, status transitions, and satisfaction scores. "
+                "channel breakdowns, assignment metrics, status transitions, satisfaction scores, "
+                "First Response %SLA metrics, and CSAT survey responses. "
                 "Supports flexible time bucketing (daily/weekly/monthly) and grouping/filtering options."
             ),
             inputSchema={
@@ -1036,12 +1037,12 @@ async def handle_list_tools() -> list[types.Tool]:
                     "include_metrics": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Metric types to include. Options: 'response_times', 'resolution_times', 'channels', 'forms', 'assignments', 'status_transitions', 'satisfaction'. Defaults to all."
+                        "description": "Metric types to include. Options: 'response_times', 'resolution_times', 'channels', 'forms', 'assignments', 'status_transitions (approximate)', 'satisfaction', 'first_response_sla', 'csat_survey'. Defaults to all."
                     },
                     "group_by": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Dimensions to group by. Options: 'channel', 'form', 'priority', 'type', 'group_id', 'tags'."
+                        "description": "Dimensions to group by. Options: 'channel', 'form', 'priority', 'type', 'group_id', 'tags', 'requester', 'organization', 'custom_fields'."
                     },
                     "filter_by_status": {
                         "type": "array",
@@ -1058,11 +1059,293 @@ async def handle_list_tools() -> list[types.Tool]:
                         "items": {"type": "string"},
                         "description": "Filter tickets to those containing any of the specified tags (e.g., ['bug', 'urgent'])."
                     },
+                    "filter_by_csat_score": {
+                        "type": "string",
+                        "enum": ["low", "high"],
+                        "description": "Filter by CSAT score. 'low' filters tickets with CSAT <= 2 (bad CSAT), 'high' filters tickets with CSAT >= 4."
+                    },
+                    "filter_by_sla_breach": {
+                        "type": "boolean",
+                        "description": "Filter by SLA breach status. True for tickets that breached first response SLA, False for tickets that met SLA."
+                    },
+                    "filter_by_organization_id": {
+                        "type": "integer",
+                        "description": "Filter tickets by organization ID (e.g., filter by GOLD customers organization)."
+                    },
+                    "filter_by_custom_field": {
+                        "type": "object",
+                        "description": "Filter by custom field. Provide object with 'field_id' (integer) and 'value' (string). Example: {'field_id': 12345, 'value': 'GOLD'} to filter by customer tier.",
+                        "properties": {
+                            "field_id": {"type": "integer"},
+                            "value": {"type": "string"}
+                        }
+                    },
                     "time_bucket": {
                         "type": "string",
                         "enum": ["daily", "weekly", "monthly"],
                         "description": "Time bucketing granularity. Defaults to 'weekly'.",
                         "default": "weekly"
+                    }
+                },
+                "required": []
+            }
+        ),
+        types.Tool(
+            name="get_ticket_sla_status",
+            description=(
+                "Get SLA status for a specific ticket including first response SLA breach status, "
+                "target times, and actual times. Uses Ticket Metric Events API to determine if "
+                "the ticket's first reply met or breached its SLA target."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "ticket_id": {
+                        "type": "integer",
+                        "description": "The ID of the ticket to get SLA status for"
+                    }
+                },
+                "required": ["ticket_id"]
+            }
+        ),
+        types.Tool(
+            name="search_tickets_by_csat",
+            description=(
+                "Search and filter tickets by CSAT score ranges. Useful for finding tickets with "
+                "bad CSAT (low scores) or high CSAT. Includes CSAT comments in results. "
+                "Supports filtering by organization and custom fields (e.g., GOLD customers). "
+                "Note: By default this filters by ticket created_at. Set filter_by_rating_date=true to filter by "
+                "survey response created_at using the Guide Survey Responses API."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "csat_score": {
+                        "type": "string",
+                        "enum": ["low", "high", "any"],
+                        "description": "CSAT score filter. 'low' for 1-2 (bad), 'high' for 4-5 (good), 'any' for 1-5."
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Optional start date (YYYY-MM-DD). Interpreted as ticket created_at unless filter_by_rating_date=true."
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Optional end date (YYYY-MM-DD). Interpreted as ticket created_at unless filter_by_rating_date=true."
+                    },
+                    "organization_id": {
+                        "type": "integer",
+                        "description": "Optional organization ID to filter tickets (e.g., GOLD customers)."
+                    },
+                    "custom_field": {
+                        "type": "object",
+                        "description": "Optional custom field filter. Provide object with 'field_id' and 'value'.",
+                        "properties": {
+                            "field_id": {"type": "integer"},
+                            "value": {"type": "string"}
+                        }
+                    },
+                    "filter_by_rating_date": {
+                        "type": "boolean",
+                        "description": "If true, filter by CSAT survey response created_at (Guide Survey Responses API).",
+                        "default": False
+                    },
+                    "has_comment": {
+                        "type": "boolean",
+                        "description": "If true, only include results where a CSAT comment is present.",
+                        "default": False
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of tickets to return (default 100)",
+                        "default": 100
+                    }
+                },
+                "required": ["csat_score"]
+            }
+        ),
+        types.Tool(
+            name="list_survey_responses_zendesk",
+            description=(
+                "List CSAT Survey Responses via Zendesk Guide API (GET /api/v2/guide/survey_responses). "
+                "Filters by survey response created_at, subject tickets, responder IDs, rating range/category, and comment presence. "
+                "Use this when you need precise filtering by when the survey was submitted (response created_at)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "created_at_start_ms": {"type": "integer", "description": "Filter responses created at or after this UNIX epoch in milliseconds."},
+                    "created_at_end_ms": {"type": "integer", "description": "Filter responses created at or before this UNIX epoch in milliseconds."},
+                    "subject_ticket_ids": {"type": "array", "items": {"type": "integer"}, "description": "Optional list of ticket IDs to restrict results to."},
+                    "responder_ids": {"type": "array", "items": {"type": "integer"}, "description": "Optional list of responder (user) IDs."},
+                    "rating_min": {"type": "integer", "description": "Client-side filter: minimum rating (1-5)."},
+                    "rating_max": {"type": "integer", "description": "Client-side filter: maximum rating (1-5)."},
+                    "rating_category": {"type": "string", "enum": ["good", "bad"], "description": "Client-side filter: 'good' (>=4) or 'bad' (<=2)."},
+                    "has_comment": {"type": "boolean", "description": "If true, only include responses with a non-empty comment.", "default": False},
+                    "limit": {"type": "integer", "description": "Page size hint (not all APIs honor). This tool returns one page and exposes next_cursor.", "default": 100},
+                    "cursor": {"type": "string", "description": "Pagination cursor from previous call (meta.after_cursor)."}
+                },
+                "required": []
+            }
+        ),
+        types.Tool(
+            name="count_survey_responses_zendesk",
+            description=(
+                "Count CSAT Survey Responses via Zendesk Guide API with the same filters as list_survey_responses_zendesk. "
+                "This iterates through pages and returns only the total_count for efficient volume queries."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "created_at_start_ms": {"type": "integer", "description": "Filter responses created at or after this UNIX epoch in milliseconds."},
+                    "created_at_end_ms": {"type": "integer", "description": "Filter responses created at or before this UNIX epoch in milliseconds."},
+                    "subject_ticket_ids": {"type": "array", "items": {"type": "integer"}, "description": "Optional list of ticket IDs to restrict results to."},
+                    "responder_ids": {"type": "array", "items": {"type": "integer"}, "description": "Optional list of responder (user) IDs."},
+                    "rating_min": {"type": "integer", "description": "Client-side filter: minimum rating (1-5)."},
+                    "rating_max": {"type": "integer", "description": "Client-side filter: maximum rating (1-5)."},
+                    "rating_category": {"type": "string", "enum": ["good", "bad"], "description": "Client-side filter: 'good' (>=4) or 'bad' (<=2)."},
+                    "has_comment": {"type": "boolean", "description": "If true, only include responses with a non-empty comment.", "default": False},
+                    "cursor": {"type": "string", "description": "Optional starting pagination cursor."}
+                },
+                "required": []
+            }
+        ),
+        types.Tool(
+            name="get_sla_policies",
+            description=(
+                "Retrieve all SLA policies configured in Zendesk. Returns policy details including "
+                "targets for first reply time, next reply time, and resolution time. Useful for "
+                "understanding SLA requirements and thresholds."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+        types.Tool(
+            name="get_sla_policy",
+            description=(
+                "Retrieve a specific SLA policy by ID. Returns detailed policy configuration including "
+                "targets, conditions, and business hours settings."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "policy_id": {
+                        "type": "integer",
+                        "description": "The ID of the SLA policy to retrieve"
+                    }
+                },
+                "required": ["policy_id"]
+            }
+        ),
+        types.Tool(
+            name="search_tickets_with_sla_breaches",
+            description=(
+                "Search for tickets that have breached their SLA targets. Can filter by breach type "
+                "(first_reply_time, next_reply_time, resolution_time), ticket status, and priority. "
+                "Returns tickets with detailed SLA breach information including when the breach occurred "
+                "and which SLA policy was violated."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "breach_type": {
+                        "type": "string",
+                        "enum": ["first_reply_time", "next_reply_time", "resolution_time"],
+                        "description": "Optional filter for specific type of SLA breach"
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Optional filter by ticket status (e.g., 'open', 'pending')"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "description": "Optional filter by ticket priority (e.g., 'high', 'urgent')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of tickets to return (default 100)",
+                        "default": 100
+                    }
+                },
+                "required": []
+            }
+        ),
+        types.Tool(
+            name="get_tickets_at_risk_of_breach",
+            description=(
+                "Find tickets that are at risk of breaching their SLA but haven't breached yet. "
+                "Useful for proactive SLA management and identifying tickets that need immediate attention. "
+                "Can filter by ticket status and priority."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Optional filter by ticket status (default: open and pending tickets)"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "description": "Optional filter by ticket priority (e.g., 'high', 'urgent')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of tickets to return (default 50)",
+                        "default": 50
+                    }
+                },
+                "required": []
+            }
+        ),
+        types.Tool(
+            name="get_recent_tickets_with_csat",
+            description=(
+                "Retrieve recent solved tickets with CSAT (Customer Satisfaction) scores and comments. "
+                "Returns the most recent tickets that have customer satisfaction ratings, including any "
+                "feedback comments provided. Useful for analyzing customer satisfaction trends and feedback."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of tickets to return (default 20)",
+                        "default": 20
+                    }
+                },
+                "required": []
+            }
+        ),
+        types.Tool(
+            name="get_tickets_with_csat_this_week",
+            description=(
+                "Retrieve all tickets with CSAT (Customer Satisfaction) scores from this week. "
+                "Returns solved tickets that were updated this week and have customer satisfaction ratings. "
+                "Useful for weekly satisfaction tracking and monitoring customer feedback trends."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+        types.Tool(
+            name="get_gold_customers",
+            description=(
+                "Retrieve customers/organizations marked as 'gold'. "
+                "Returns the first N gold-tier customers identified by 'gold' tag or custom field value. "
+                "Useful for identifying premium customers and their support tickets."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of gold customers to return (default 10)",
+                        "default": 10
                     }
                 },
                 "required": []
@@ -1079,14 +1362,14 @@ async def handle_call_tool(
     """Handle Zendesk tool execution requests"""
     try:
         from zendesk_mcp_server.handlers import TOOL_HANDLERS
-        
+
         client = get_zendesk_client()
-        
+
         # Dispatch to registered handler
         handler = TOOL_HANDLERS.get(name)
         if handler:
             return await handler(client, arguments)
-        
+
         raise ValueError(f"Unknown tool: {name}")
     except Exception as e:
         return [types.TextContent(

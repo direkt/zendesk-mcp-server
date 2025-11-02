@@ -5,6 +5,7 @@ from zendesk_mcp_server.client.search import SearchMixin
 from zendesk_mcp_server.client.kb import KnowledgeBaseMixin
 from zendesk_mcp_server.client.attachments import AttachmentsMixin
 from zendesk_mcp_server.client.relationships import RelationshipsMixin
+from zendesk_mcp_server.client.sla import SLAMixin
 
 
 class ZendeskClient(
@@ -14,6 +15,7 @@ class ZendeskClient(
     KnowledgeBaseMixin,
     AttachmentsMixin,
     RelationshipsMixin,
+    SLAMixin,
 ):
     """
     Main ZendeskClient class composed from base and specialized mixins.

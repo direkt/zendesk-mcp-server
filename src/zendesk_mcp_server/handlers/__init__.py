@@ -32,6 +32,16 @@ TOOL_HANDLERS = {
     "batch_search_tickets": tools.handle_batch_search_tickets,
     "get_ticket_bundle_zendesk": tools.handle_get_ticket_bundle_zendesk,
     "get_case_volume_analytics": tools.handle_get_case_volume_analytics,
+    "get_ticket_sla_status": tools.handle_get_ticket_sla_status,
+    "search_tickets_by_csat": tools.handle_search_tickets_by_csat,
+    "list_survey_responses_zendesk": tools.handle_list_survey_responses_zendesk,
+    "count_survey_responses_zendesk": tools.handle_count_survey_responses_zendesk,
+    "get_sla_policies": tools.handle_get_sla_policies,
+    "get_sla_policy": tools.handle_get_sla_policy,
+    "search_tickets_with_sla_breaches": tools.handle_search_tickets_with_sla_breaches,
+    "get_tickets_at_risk_of_breach": tools.handle_get_tickets_at_risk_of_breach,
+    "get_recent_tickets_with_csat": tools.handle_get_recent_tickets_with_csat,
+    "get_tickets_with_csat_this_week": tools.handle_get_tickets_with_csat_this_week,
 }
 
 __all__ = ['TOOL_HANDLERS']

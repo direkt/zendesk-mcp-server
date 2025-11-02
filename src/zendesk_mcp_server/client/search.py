@@ -8,9 +8,15 @@ import calendar
 from zendesk_mcp_server.exceptions import ZendeskError, ZendeskAPIError, ZendeskValidationError
 
 
+
+# Concurrency and analytics caps
+BATCH_SEARCH_CONCURRENCY = 3
+TOP_ENTITY_BREAKDOWN = 50
+DEFAULT_ANALYTICS_MAX_RESULTS = 10000
+
 class SearchMixin:
     """Mixin providing search-related methods."""
-    
+
     def search_tickets(
         self,
         query: str,
@@ -105,16 +111,16 @@ class SearchMixin:
             for ticket in search_results:
                 if max_results and count >= max_results:
                     break
-                
+
                 # Extract via object for channel/source info
                 via_obj = getattr(ticket, 'via', None)
                 via_data = None
                 if via_obj:
                     via_data = {
                         'channel': getattr(via_obj, 'channel', None),
-                        'source': getattr(via_obj, 'source', None) if hasattr(via_obj, 'source') else None,
+                        'source': (str(getattr(via_obj, 'source', None)) if getattr(via_obj, 'source', None) is not None else None),
                     }
-                
+
                 # Extract metric fields
                 metric_set = getattr(ticket, 'metric_set', None)
                 metrics = {}
@@ -127,7 +133,7 @@ class SearchMixin:
                         'requester_wait_time_in_seconds': getattr(metric_set, 'requester_wait_time_in_seconds', None),
                         'on_hold_time_in_seconds': getattr(metric_set, 'on_hold_time_in_seconds', None),
                     }
-                
+
                 # Extract satisfaction rating
                 satisfaction = getattr(ticket, 'satisfaction_rating', None)
                 satisfaction_data = None
@@ -136,7 +142,7 @@ class SearchMixin:
                         'score': getattr(satisfaction, 'score', None),
                         'comment': getattr(satisfaction, 'comment', None),
                     }
-                
+
                 # Extract custom fields
                 custom_fields_data = []
                 custom_fields_obj = getattr(ticket, 'custom_fields', None)
@@ -146,7 +152,7 @@ class SearchMixin:
                             'id': getattr(cf, 'id', None),
                             'value': getattr(cf, 'value', None),
                         })
-                
+
                 tickets.append({
                     'id': ticket.id,
                     'subject': ticket.subject,
@@ -898,7 +904,7 @@ class SearchMixin:
         try:
             import asyncio
 
-            sem = asyncio.Semaphore(3)
+            sem = asyncio.Semaphore(BATCH_SEARCH_CONCURRENCY)
 
             async def execute_search(query):
                 # Limit concurrent export calls to avoid hitting rate limits
@@ -960,12 +966,16 @@ class SearchMixin:
         self,
         start_date: str | None = None,
         end_date: str | None = None,
-        max_results: int | None = None,
+        max_results: int | None = DEFAULT_ANALYTICS_MAX_RESULTS,
         include_metrics: List[str] | None = None,
         group_by: List[str] | None = None,
         filter_by_status: List[str] | None = None,
         filter_by_priority: List[str] | None = None,
         filter_by_tags: List[str] | None = None,
+        filter_by_csat_score: str | None = None,
+        filter_by_sla_breach: bool | None = None,
+        filter_by_organization_id: int | None = None,
+        filter_by_custom_field: Dict[str, Any] | None = None,
         time_bucket: str = "weekly",
     ) -> Dict[str, Any]:
         """Aggregate comprehensive ticket analytics by week, month, and technician.
@@ -974,18 +984,23 @@ class SearchMixin:
             start_date: Inclusive start date in ISO format (YYYY-MM-DD). Defaults to encompass
                 the last 13 weeks and 12 months relative to the end date.
             end_date: Inclusive end date in ISO format (YYYY-MM-DD). Defaults to today (UTC).
-            max_results: Optional safety cap for search export results.
-            include_metrics: List of metric types to include. Options: 'response_times', 
-                'resolution_times', 'channels', 'forms', 'assignments', 'status_transitions', 
-                'satisfaction'. If None, includes all metrics.
-            group_by: List of dimensions to group by. Options: 'channel', 'form', 'priority', 
-                'type', 'group_id', 'tags', 'requester', 'organization', 'custom_fields'. 
+            max_results: Optional safety cap for search export results. Defaults to DEFAULT_ANALYTICS_MAX_RESULTS.
+            include_metrics: List of metric types to include. Options: 'response_times',
+                'resolution_times', 'channels', 'forms', 'assignments', 'status_transitions (approximate)',
+                'satisfaction', 'first_response_sla', 'csat_survey'. If None, includes all metrics.
+            group_by: List of dimensions to group by. Options: 'channel', 'form', 'priority',
+                'type', 'group_id', 'tags', 'requester', 'organization', 'custom_fields'.
                 If None, only groups by time and assignee.
             filter_by_status: Filter tickets to specific statuses. If None, includes all statuses.
             filter_by_priority: Filter tickets to specific priorities. If None, includes all priorities.
-            filter_by_tags: Filter tickets to those containing any of the specified tags. 
+            filter_by_tags: Filter tickets to those containing any of the specified tags.
                 If None, includes all tickets.
-            time_bucket: Time bucketing granularity. Options: 'daily', 'weekly', 'monthly'. 
+            filter_by_csat_score: Filter by CSAT score. Options: 'low' (<=2), 'high' (>=4), or specific range.
+            filter_by_sla_breach: Filter by SLA breach status. True for breached, False for met, None for all.
+            filter_by_organization_id: Filter tickets by organization ID. If None, includes all organizations.
+            filter_by_custom_field: Filter by custom field. Dict with 'field_id' and 'value' keys.
+                Example: {'field_id': 12345, 'value': 'GOLD'} to filter by customer tier.
+            time_bucket: Time bucketing granularity. Options: 'daily', 'weekly', 'monthly'.
                 Defaults to 'weekly'.
 
         Returns:
@@ -1045,19 +1060,70 @@ class SearchMixin:
         )
 
         tickets = results.get("tickets", [])
-        
+
         # Determine which metrics to include (default: all)
         if include_metrics is None:
-            include_metrics = ['response_times', 'resolution_times', 'channels', 'forms', 
-                              'assignments', 'status_transitions', 'satisfaction']
-        
-        # Apply filters
+            include_metrics = ['response_times', 'resolution_times', 'channels', 'forms',
+                              'assignments', 'status_transitions', 'satisfaction', 'first_response_sla', 'csat_survey']
+
+        # Pre-fetch SLA metric events if needed
+        sla_metric_events_map: Dict[int, List[Dict[str, Any]]] = {}
+        if 'first_response_sla' in include_metrics or filter_by_sla_breach is not None:
+            try:
+                start_ts = int(datetime.combine(start_dt, datetime.min.time()).replace(tzinfo=timezone.utc).timestamp())
+                metric_events, _, _ = self.incremental_ticket_metric_events(
+                    start_time=start_ts,
+                    max_results=max_results * 10 if max_results else None  # Metric events can be more numerous
+                )
+                # Group metric events by ticket_id
+                for event in metric_events:
+                    ticket_id = event.get('ticket_id')
+                    if ticket_id:
+                        if ticket_id not in sla_metric_events_map:
+                            sla_metric_events_map[ticket_id] = []
+                        sla_metric_events_map[ticket_id].append(event)
+            except Exception:
+                # If bulk fetch fails, fall back to per-ticket fetching
+                pass
+
+        # Pre-fetch CSAT survey responses if needed
+        csat_responses_map: Dict[int, List[Dict[str, Any]]] = {}
+        if 'csat_survey' in include_metrics or filter_by_csat_score:
+            try:
+                csat_responses_result = self.search_csat_survey_responses(
+                    created_after=start_dt.isoformat(),
+                    created_before=end_dt.isoformat(),
+                    limit=max_results * 5 if max_results else 10000
+                )
+                csat_responses = csat_responses_result.get('csat_survey_responses', [])
+                # Group CSAT responses by ticket_id
+                for response in csat_responses:
+                    ticket_id = response.get('ticket_id')
+                    if ticket_id:
+                        if ticket_id not in csat_responses_map:
+                            csat_responses_map[ticket_id] = []
+                        csat_responses_map[ticket_id].append(response)
+            except Exception:
+                # If bulk fetch fails, fall back to per-ticket fetching
+                pass
+
+        # Apply basic filters
         if filter_by_status:
             tickets = [t for t in tickets if t.get('status') in filter_by_status]
         if filter_by_priority:
             tickets = [t for t in tickets if t.get('priority') in filter_by_priority]
         if filter_by_tags:
             tickets = [t for t in tickets if any(tag in (t.get('tags') or []) for tag in filter_by_tags)]
+        if filter_by_organization_id:
+            tickets = [t for t in tickets if t.get('organization_id') == filter_by_organization_id]
+        if filter_by_custom_field:
+            field_id = filter_by_custom_field.get('field_id')
+            field_value = filter_by_custom_field.get('value')
+            if field_id and field_value:
+                tickets = [t for t in tickets if any(
+                    cf.get('id') == field_id and str(cf.get('value')) == str(field_value)
+                    for cf in (t.get('custom_fields') or [])
+                )]
 
         # Initialize all aggregation structures
         weekly_counts: defaultdict[str, int] = defaultdict(int)
@@ -1067,7 +1133,7 @@ class SearchMixin:
         status_counts: defaultdict[str, int] = defaultdict(int)
         priority_counts: defaultdict[str, int] = defaultdict(int)
         type_counts: defaultdict[str, int] = defaultdict(int)
-        
+
         # Time-based metrics
         response_times: List[float] = []
         first_resolution_times: List[float] = []
@@ -1075,40 +1141,47 @@ class SearchMixin:
         agent_wait_times: List[float] = []
         requester_wait_times: List[float] = []
         on_hold_times: List[float] = []
-        
+
         # Channel/source metrics
         channel_counts: defaultdict[str, int] = defaultdict(int)
         form_counts: defaultdict[int, int] = defaultdict(int)
         group_counts: defaultdict[int, int] = defaultdict(int)
-        
+
         # Assignment metrics
         reassignment_counts: defaultdict[str, int] = defaultdict(int)
         assignment_times: List[float] = []
-        
+
         # Status transition metrics
         status_transition_counts: defaultdict[str, int] = defaultdict(int)
         time_in_status: defaultdict[str, List[float]] = defaultdict(list)
-        
-        # Satisfaction metrics
+
+        # Satisfaction metrics (legacy and new)
         satisfaction_scores: List[int] = []
         satisfaction_counts: defaultdict[int, int] = defaultdict(int)
+        csat_comments: List[Dict[str, Any]] = []
         
+        # SLA metrics
+        sla_breached_count = 0
+        sla_met_count = 0
+        sla_tickets_with_events = 0
+        sla_breach_details: List[Dict[str, Any]] = []
+
         # Tag metrics
         tag_counts: defaultdict[str, int] = defaultdict(int)
         tag_weekly_counts: defaultdict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
-        
+
         # Requester metrics
         requester_weekly: defaultdict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
         requester_counts: defaultdict[int, int] = defaultdict(int)
-        
+
         # Organization metrics
         organization_weekly: defaultdict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
         organization_counts: defaultdict[int, int] = defaultdict(int)
-        
+
         # Custom field metrics
         custom_field_counts: defaultdict[str, defaultdict[str, int]] = defaultdict(lambda: defaultdict(int))
         custom_field_weekly_counts: defaultdict[str, defaultdict[str, defaultdict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-        
+
         # Grouped metrics (if group_by specified)
         grouped_counts: Dict[str, Dict[str, int]] = {}
         if group_by:
@@ -1149,7 +1222,7 @@ class SearchMixin:
         end_month_start = end_dt.replace(day=1)
         start_month_start = start_dt.replace(day=1)
         month_sequence = _generate_month_keys(start_month_start, end_month_start)
-        
+
         daily_sequence = _generate_daily_keys(start_dt, end_dt)
 
         total_tickets = 0
@@ -1169,6 +1242,56 @@ class SearchMixin:
             created_date = created_dt.date()
             if created_date < start_dt or created_date > end_dt:
                 continue
+
+            ticket_id = ticket.get("id")
+            
+            # Pre-check SLA and CSAT for filtering (needed before processing)
+            ticket_sla_breached = None
+            ticket_csat_score = None
+            
+            # Quick SLA check for filtering
+            if filter_by_sla_breach is not None:
+                metric_events = sla_metric_events_map.get(ticket_id, [])
+                if not metric_events and ticket_id:
+                    try:
+                        events_result = self.get_ticket_metric_events(ticket_id)
+                        metric_events = events_result.get('metric_events', [])
+                    except Exception:
+                        metric_events = []
+                
+                for event in metric_events:
+                    metric_set = event.get('metric_set', {})
+                    sla_policy = metric_set.get('sla_policy', {})
+                    if sla_policy:
+                        reply_time_breach = sla_policy.get('reply_time_in_minutes', {}).get('breached_at')
+                        if reply_time_breach:
+                            ticket_sla_breached = True
+                            break
+                        reply_time_met = sla_policy.get('reply_time_in_minutes', {}).get('target')
+                        if reply_time_met:
+                            ticket_sla_breached = False
+                
+                if ticket_sla_breached != filter_by_sla_breach:
+                    continue
+            
+            # Quick CSAT check for filtering
+            if filter_by_csat_score:
+                satisfaction = ticket.get("satisfaction_rating")
+                if satisfaction and satisfaction.get("score") is not None:
+                    ticket_csat_score = satisfaction.get("score")
+                else:
+                    csat_responses = csat_responses_map.get(ticket_id, [])
+                    if csat_responses:
+                        ticket_csat_score = csat_responses[0].get('score')
+                
+                if ticket_csat_score is not None:
+                    if filter_by_csat_score == 'low' and ticket_csat_score > 2:
+                        continue
+                    elif filter_by_csat_score == 'high' and ticket_csat_score < 4:
+                        continue
+                elif filter_by_csat_score in ['low', 'high']:
+                    # If filtering by CSAT but ticket has no CSAT, skip it
+                    continue
 
             # Time bucket keys
             iso_year, iso_week, _ = created_date.isocalendar()
@@ -1229,11 +1352,11 @@ class SearchMixin:
                     reply_time = metrics.get("reply_time_in_seconds")
                     if reply_time is not None:
                         response_times.append(float(reply_time))
-                    
+
                     agent_wait = metrics.get("agent_wait_time_in_seconds")
                     if agent_wait is not None:
                         agent_wait_times.append(float(agent_wait))
-                    
+
                     requester_wait = metrics.get("requester_wait_time_in_seconds")
                     if requester_wait is not None:
                         requester_wait_times.append(float(requester_wait))
@@ -1242,11 +1365,11 @@ class SearchMixin:
                     first_res = metrics.get("first_resolution_time_in_seconds")
                     if first_res is not None:
                         first_resolution_times.append(float(first_res))
-                    
+
                     full_res = metrics.get("full_resolution_time_in_seconds")
                     if full_res is not None:
                         full_resolution_times.append(float(full_res))
-                    
+
                     on_hold = metrics.get("on_hold_time_in_seconds")
                     if on_hold is not None:
                         on_hold_times.append(float(on_hold))
@@ -1274,13 +1397,89 @@ class SearchMixin:
                 except (ValueError, TypeError):
                     pass
 
-            # Satisfaction metrics
-            if 'satisfaction' in include_metrics:
+            # SLA metrics - check first response SLA breach status (full processing)
+            if 'first_response_sla' in include_metrics:
+                # Check metric events for this ticket
+                metric_events = sla_metric_events_map.get(ticket_id, [])
+                if not metric_events and ticket_id:
+                    # Fallback: fetch per-ticket if not in bulk map
+                    try:
+                        events_result = self.get_ticket_metric_events(ticket_id)
+                        metric_events = events_result.get('metric_events', [])
+                    except Exception:
+                        metric_events = []
+                
+                # Look for first response SLA breach events
+                for event in metric_events:
+                    metric_set = event.get('metric_set', {})
+                    sla_policy = metric_set.get('sla_policy', {})
+                    if sla_policy:
+                        # Check for first reply time SLA
+                        reply_time_breach = sla_policy.get('reply_time_in_minutes', {}).get('breached_at')
+                        if reply_time_breach:
+                            ticket_sla_breached = True
+                            sla_breached_count += 1
+                            sla_breach_details.append({
+                                'ticket_id': ticket_id,
+                                'breach_type': 'first_response',
+                                'breached_at': reply_time_breach,
+                            })
+                            break
+                        # If no breach found, check if SLA was met
+                        reply_time_met = sla_policy.get('reply_time_in_minutes', {}).get('target')
+                        if reply_time_met and ticket_sla_breached is None:
+                            ticket_sla_breached = False
+                            sla_met_count += 1
+                
+                if ticket_sla_breached is not None:
+                    sla_tickets_with_events += 1
+
+            # Satisfaction metrics (legacy)
+            if 'satisfaction' in include_metrics or 'csat_survey' in include_metrics:
                 satisfaction = ticket.get("satisfaction_rating")
                 if satisfaction and satisfaction.get("score") is not None:
                     score = satisfaction.get("score")
+                    ticket_csat_score = score
                     satisfaction_scores.append(score)
                     satisfaction_counts[score] += 1
+                    # Add comment if available
+                    comment = satisfaction.get("comment")
+                    if comment:
+                        csat_comments.append({
+                            'ticket_id': ticket_id,
+                            'score': score,
+                            'comment': comment,
+                            'source': 'legacy',
+                        })
+
+            # CSAT Survey Responses (new API)
+            if 'csat_survey' in include_metrics:
+                csat_responses = csat_responses_map.get(ticket_id, [])
+                if not csat_responses and ticket_id:
+                    # Fallback: fetch per-ticket if not in bulk map
+                    try:
+                        responses_result = self.get_ticket_csat_survey_responses(ticket_id)
+                        csat_responses = responses_result.get('csat_survey_responses', [])
+                    except Exception:
+                        csat_responses = []
+                
+                for response in csat_responses:
+                    score = response.get('score')
+                    if score is not None:
+                        if ticket_csat_score is None:
+                            ticket_csat_score = score
+                        satisfaction_scores.append(score)
+                        satisfaction_counts[score] += 1
+                        # Add comment if available
+                        comment = response.get('comment')
+                        if comment:
+                            csat_comments.append({
+                                'ticket_id': ticket_id,
+                                'score': score,
+                                'comment': comment,
+                                'source': 'survey',
+                                'created_at': response.get('created_at'),
+                            })
 
             # Tag metrics
             tags = ticket.get("tags", [])
@@ -1458,7 +1657,7 @@ class SearchMixin:
         # Add status transition metrics
         if 'status_transitions' in include_metrics:
             status_time_stats = {
-                status: _calc_stats(times) 
+                status: _calc_stats(times)
                 for status, times in time_in_status.items()
             }
             response["status_transition_metrics"] = {
@@ -1466,20 +1665,45 @@ class SearchMixin:
                 "time_in_status": status_time_stats,
             }
 
-        # Add satisfaction metrics
-        if 'satisfaction' in include_metrics:
+        # Add satisfaction metrics (legacy and new)
+        if 'satisfaction' in include_metrics or 'csat_survey' in include_metrics:
             avg_satisfaction = sum(satisfaction_scores) / len(satisfaction_scores) if satisfaction_scores else 0
             response["satisfaction_metrics"] = {
                 "average_score": round(avg_satisfaction, 2),
                 "total_ratings": len(satisfaction_scores),
                 "score_distribution": dict(sorted(satisfaction_counts.items())),
             }
+            if csat_comments:
+                response["satisfaction_metrics"]["comments"] = csat_comments[:100]  # Limit to top 100 comments
+
+        # Add CSAT survey metrics (if specifically requested)
+        if 'csat_survey' in include_metrics:
+            response["csat_survey_metrics"] = {
+                "total_responses": len(csat_responses_map),
+                "comments_count": len([c for c in csat_comments if c.get('source') == 'survey']),
+            }
+
+        # Add First Response SLA metrics
+        if 'first_response_sla' in include_metrics:
+            total_sla_tickets = sla_breached_count + sla_met_count
+            sla_percentage_met = (sla_met_count / total_sla_tickets * 100) if total_sla_tickets > 0 else 0
+            sla_percentage_breached = (sla_breached_count / total_sla_tickets * 100) if total_sla_tickets > 0 else 0
+            
+            response["first_response_sla_metrics"] = {
+                "tickets_with_sla_events": sla_tickets_with_events,
+                "tickets_met_sla": sla_met_count,
+                "tickets_breached_sla": sla_breached_count,
+                "percentage_met": round(sla_percentage_met, 2),
+                "percentage_breached": round(sla_percentage_breached, 2),
+            }
+            if sla_breach_details:
+                response["first_response_sla_metrics"]["breach_details"] = sla_breach_details[:100]  # Limit to top 100 breaches
 
         # Add tag metrics
         if tag_counts:
             top_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)
             tag_breakdown = {tag: count for tag, count in top_tags}
-            
+
             # Build tag weekly series
             tag_weekly_series = []
             for tag, weekly_counts_dict in sorted(tag_weekly_counts.items(), key=lambda x: sum(x[1].values()), reverse=True):
@@ -1491,7 +1715,7 @@ class SearchMixin:
                         for week in week_sequence
                     ],
                 })
-            
+
             response["tag_breakdown"] = tag_breakdown
             response["tag_weekly_counts"] = tag_weekly_series[:50]  # Limit to top 50 tags to avoid huge responses
 
@@ -1509,7 +1733,7 @@ class SearchMixin:
                     ],
                 })
             response["requester_weekly_counts"] = requester_series
-            response["requester_breakdown"] = {str(k): v for k, v in sorted(requester_counts.items(), key=lambda x: x[1], reverse=True)}
+            response["requester_breakdown"] = {str(k): v for k, v in sorted(requester_counts.items(), key=lambda x: x[1], reverse=True)[:TOP_ENTITY_BREAKDOWN]}
 
         # Add organization analytics
         if organization_counts:
@@ -1525,19 +1749,19 @@ class SearchMixin:
                     ],
                 })
             response["organization_weekly_counts"] = organization_series
-            response["organization_breakdown"] = {str(k): v for k, v in sorted(organization_counts.items(), key=lambda x: x[1], reverse=True)}
+            response["organization_breakdown"] = {str(k): v for k, v in sorted(organization_counts.items(), key=lambda x: x[1], reverse=True)[:TOP_ENTITY_BREAKDOWN]}
 
         # Add custom field analytics
         if custom_field_counts:
             custom_field_breakdown = {}
             custom_field_weekly_series = []
-            
+
             # Build breakdown by field ID, then by value
             for field_id, value_counts in sorted(custom_field_counts.items(), key=lambda x: sum(x[1].values()), reverse=True):
                 # Top values for this field
                 top_values = sorted(value_counts.items(), key=lambda x: x[1], reverse=True)[:20]  # Limit to top 20 values per field
                 custom_field_breakdown[field_id] = {value: count for value, count in top_values}
-                
+
                 # Build weekly series for top values of this field
                 field_weekly = custom_field_weekly_counts.get(field_id, {})
                 for value, count in top_values:
@@ -1551,7 +1775,7 @@ class SearchMixin:
                             for week in week_sequence
                         ],
                     })
-            
+
             response["custom_field_breakdown"] = custom_field_breakdown
             response["custom_field_weekly_counts"] = custom_field_weekly_series[:100]  # Limit to top 100 field:value combinations
 
